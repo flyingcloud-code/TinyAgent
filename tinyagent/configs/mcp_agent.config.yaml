@@ -1,0 +1,61 @@
+# MCP Server Configuration for TinyAgent
+# This file defines available MCP servers and their connection details
+
+servers:
+  # File system operations
+  filesystem:
+    command: "npx"
+    args: ["@modelcontextprotocol/server-filesystem", "C:/work/github/TinyAgent"]
+    env: {}
+    category: "file_tool"
+    description: "File system operations (read, write, list directories)"
+    
+  # Web fetch operations  
+  fetch:
+    command: "npx"
+    args: ["@modelcontextprotocol/server-fetch"]
+    env: {}
+    category: "web_tool"
+    description: "HTTP requests and web content fetching"
+    
+  # Example custom Python MCP server (stdio)
+  custom_document_generator:
+    command: "python"
+    args: ["-m", "tinyagent.tools.document_generator"]
+    env: {}
+    category: "doc_gen_tool"
+    description: "Custom document generation tools"
+    enabled: false  # Disabled until implemented
+
+# MCP Client Configuration
+client:
+  # Connection timeout in seconds
+  timeout: 30
+  
+  # Retry configuration
+  max_retries: 3
+  retry_delay: 1.0
+  
+  # Tool discovery cache duration (seconds)
+  tool_cache_duration: 300
+  
+  # Maximum tools to load per server
+  max_tools_per_server: 50
+
+# Tool Categories (for better organization and selection)
+categories:
+  file_tool:
+    description: "Tools for file system operations"
+    priority: "high"
+    
+  web_tool:
+    description: "Tools for web operations and HTTP requests"
+    priority: "medium"
+    
+  doc_gen_tool:
+    description: "Tools for document generation and processing"
+    priority: "high"
+    
+  utility_tool:
+    description: "General utility tools"
+    priority: "low" 

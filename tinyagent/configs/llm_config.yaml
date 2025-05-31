@@ -1,0 +1,35 @@
+# LLM Configuration for TinyAgent
+# This file defines available LLM providers and their settings
+
+# Active LLM provider (must match one of the providers below)
+active_provider: "openai"
+
+# LLM Provider Configurations
+providers:
+  openai:
+    model: "gpt-4"
+    api_key_env_var: "OPENAI_API_KEY"  # Environment variable name
+    max_tokens: 2000
+    temperature: 0.7
+    
+  litellm_ollama:
+    model: "ollama/llama2"
+    api_base: "http://localhost:11434"
+    api_key_env_var: ""  # Not needed for local models
+    max_tokens: 2000
+    temperature: 0.7
+    
+  litellm_azure:
+    model: "azure/gpt-4"
+    api_key_env_var: "AZURE_OPENAI_API_KEY"
+    api_base_env_var: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2023-12-01-preview"
+    max_tokens: 2000
+    temperature: 0.7
+
+# Default settings that apply to all providers (can be overridden)
+defaults:
+  max_tokens: 2000
+  temperature: 0.7
+  timeout: 30
+  retry_attempts: 3 
