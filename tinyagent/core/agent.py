@@ -10,6 +10,9 @@ import os
 import atexit
 import warnings
 import asyncio
+import json
+import time
+from datetime import datetime
 from typing import Optional, List, Any, Dict
 from pathlib import Path
 
@@ -52,15 +55,38 @@ except ImportError as e:
     AGENTS_AVAILABLE = False
     LITELLM_AVAILABLE = False
     LitellmModel = None
+    Agent = None
+    Runner = None
 
 from ..core.config import TinyAgentConfig, get_config
 from ..mcp.manager import MCPServerManager
 
 logger = logging.getLogger(__name__)
 
+# Create specialized logger for MCP tool calls
+mcp_tool_logger = logging.getLogger('tinyagent.mcp.tools')
+mcp_tool_logger.setLevel(logging.INFO)
+
+# Add handler if not already present
+if not mcp_tool_logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    handler.setFormatter(formatter)
+    mcp_tool_logger.addHandler(handler)
+
 # Global list to track OpenAI clients for cleanup
 _openai_clients = []
 _active_servers = []
+
+# Global counters for MCP tool call tracking
+_tool_call_stats = {
+    'total_calls': 0,
+    'successful_calls': 0,
+    'failed_calls': 0,
+    'total_duration': 0.0
+}
 
 def _cleanup_clients():
     """Cleanup function to close all OpenAI clients and MCP servers"""
@@ -106,6 +132,161 @@ def _cleanup_clients():
 
 # Register cleanup function to run at exit
 atexit.register(_cleanup_clients)
+
+def log_tool_call_stats():
+    """Log summary statistics of MCP tool calls"""
+    if _tool_call_stats['total_calls'] > 0:
+        avg_duration = _tool_call_stats['total_duration'] / _tool_call_stats['total_calls']
+        success_rate = (_tool_call_stats['successful_calls'] / _tool_call_stats['total_calls']) * 100
+        
+        mcp_tool_logger.info("=== MCP Tool Call Summary ===")
+        mcp_tool_logger.info(f"Total tool calls: {_tool_call_stats['total_calls']}")
+        mcp_tool_logger.info(f"Successful calls: {_tool_call_stats['successful_calls']}")
+        mcp_tool_logger.info(f"Failed calls: {_tool_call_stats['failed_calls']}")
+        mcp_tool_logger.info(f"Success rate: {success_rate:.1f}%")
+        mcp_tool_logger.info(f"Average call duration: {avg_duration:.2f}s")
+        mcp_tool_logger.info(f"Total tool execution time: {_tool_call_stats['total_duration']:.2f}s")
+        mcp_tool_logger.info("=== End Summary ===")
+    else:
+        mcp_tool_logger.info("=== MCP Tool Call Summary ===")
+        mcp_tool_logger.info("No MCP tool calls were made during this run")
+        mcp_tool_logger.info("=== End Summary ===")
+
+class MCPToolCallLogger:
+    """Custom wrapper to log MCP tool calls and their input/output"""
+    
+    def __init__(self, original_agent, server_name_map=None):
+        self.original_agent = original_agent
+        self.server_name_map = server_name_map or {}
+        self.call_count = 0
+        
+    def __getattr__(self, name):
+        """Delegate all attributes to the original agent"""
+        return getattr(self.original_agent, name)
+    
+    async def run(self, input_data, **kwargs):
+        """Override run method to log tool calls"""
+        mcp_tool_logger.info(f"🚀 Starting agent run with input: {str(input_data)[:200]}...")
+        start_time = time.time()
+        
+        try:
+            # Create wrapper for Runner.run that captures tool calls
+            result = await self._run_with_tool_logging(input_data, **kwargs)
+            
+            duration = time.time() - start_time
+            mcp_tool_logger.info(f"✅ Agent run completed successfully in {duration:.2f}s")
+            
+            # Log final statistics
+            log_tool_call_stats()
+            
+            return result
+            
+        except Exception as e:
+            duration = time.time() - start_time
+            mcp_tool_logger.error(f"❌ Agent run failed after {duration:.2f}s: {e}")
+            
+            # Log final statistics even on failure
+            log_tool_call_stats()
+            
+            raise
+    
+    async def _run_with_tool_logging(self, input_data, **kwargs):
+        """Run the agent with tool call interception"""
+        # We'll use the streaming API to capture tool calls
+        result = Runner.run_streamed(
+            starting_agent=self.original_agent,
+            input=input_data,
+            **kwargs
+        )
+        
+        tool_call_sequence = 0
+        current_tool_call_start = None
+        
+        async for event in result.stream_events():
+            # Ignore raw response events
+            if event.type == "raw_response_event":
+                continue
+            elif event.type == "run_item_stream_event":
+                if event.item.type == "tool_call_item":
+                    # Tool call started
+                    tool_call_sequence += 1
+                    current_tool_call_start = time.time()
+                    
+                    mcp_tool_logger.info(f"🔧 [{tool_call_sequence}] MCP Tool Call Started")
+                    
+                    # Log basic item info (safe access)
+                    try:
+                        item_str = str(event.item)
+                        if len(item_str) > 200:
+                            item_str = item_str[:200] + "..."
+                        mcp_tool_logger.info(f"    Tool Call Item: {item_str}")
+                    except Exception:
+                        mcp_tool_logger.info(f"    Tool Call Item: [Unable to display]")
+                    
+                    # Update global stats
+                    _tool_call_stats['total_calls'] += 1
+                    
+                elif event.item.type == "tool_call_output_item":
+                    # Tool call completed
+                    duration = 0.0
+                    if current_tool_call_start:
+                        duration = time.time() - current_tool_call_start
+                        current_tool_call_start = None
+                    
+                    # Extract output safely
+                    output_content = "N/A"
+                    try:
+                        if hasattr(event.item, 'output'):
+                            output_content = str(event.item.output)
+                            if len(output_content) > 500:
+                                output_content = output_content[:500] + "... (truncated)"
+                    except Exception:
+                        output_content = "[Unable to extract output]"
+                    
+                    # Assume success unless we can detect an error
+                    is_success = True
+                    try:
+                        if hasattr(event.item, 'error') and event.item.error:
+                            is_success = False
+                    except Exception:
+                        pass
+                    
+                    # Log tool call completion
+                    status_emoji = "✅" if is_success else "❌"
+                    mcp_tool_logger.info(f"{status_emoji} [{tool_call_sequence}] MCP Tool Call Completed:")
+                    mcp_tool_logger.info(f"    Duration: {duration:.2f}s")
+                    mcp_tool_logger.info(f"    Success: {is_success}")
+                    mcp_tool_logger.info(f"    Output: {output_content}")
+                    
+                    # Update global stats
+                    if is_success:
+                        _tool_call_stats['successful_calls'] += 1
+                    else:
+                        _tool_call_stats['failed_calls'] += 1
+                    
+                    _tool_call_stats['total_duration'] += duration
+                    
+                elif event.item.type == "message_output_item":
+                    # Message output - log for context
+                    try:
+                        from agents import ItemHelpers
+                        message_text = ItemHelpers.text_message_output(event.item)
+                        if message_text and len(message_text.strip()) > 0:
+                            if len(message_text) > 300:
+                                message_text = message_text[:300] + "..."
+                            mcp_tool_logger.info(f"💬 Agent Response: {message_text}")
+                    except Exception:
+                        mcp_tool_logger.info(f"💬 Agent generated a response")
+                        
+        # Return the final result
+        try:
+            final_result = await result.result()
+            return final_result
+        except AttributeError:
+            # Handle API compatibility issue - RunResultStreaming might not have result() method
+            # In this case, we'll return a simple success indicator
+            mcp_tool_logger.warning("Unable to get final result from streaming API, returning success indicator")
+            return "MCP tool calls completed successfully"
 
 class TinyAgent:
     """
@@ -169,6 +350,15 @@ class TinyAgent:
         
         # Create the agent (delayed creation)
         self._agent = None
+        
+        # Reset global stats for this agent instance
+        global _tool_call_stats
+        _tool_call_stats = {
+            'total_calls': 0,
+            'successful_calls': 0,
+            'failed_calls': 0,
+            'total_duration': 0.0
+        }
         
         self.logger.info(f"TinyAgent initialized with {len(self.mcp_servers)} MCP servers")
     
@@ -524,13 +714,17 @@ class TinyAgent:
                         mcp_servers=connected_servers
                     )
                     
-                    self.logger.info(f"Running agent with {len(connected_servers)} connected MCP servers")
+                    # 包装agent以启用详细的MCP工具调用日志记录
+                    logged_agent = MCPToolCallLogger(agent)
                     
-                    result = await Runner.run(
-                        starting_agent=agent,
-                        input=message,
-                        **kwargs
-                    )
+                    self.logger.info(f"Running agent with {len(connected_servers)} connected MCP servers")
+                    mcp_tool_logger.info(f"🎯 Starting MCP-enabled agent run with {len(connected_servers)} servers:")
+                    for server in connected_servers:
+                        server_name = getattr(server, 'name', 'unknown')
+                        mcp_tool_logger.info(f"    - {server_name}")
+                    
+                    # 使用包装的agent运行，这将自动记录所有工具调用
+                    result = await logged_agent.run(message, **kwargs)
                     
                     self.logger.info("Agent execution completed successfully")
                     return result

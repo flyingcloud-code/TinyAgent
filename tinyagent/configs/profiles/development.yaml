@@ -47,9 +47,25 @@ mcp:
       description: "Search the web via google and get content from web"
       enabled: true  # 启用SSE服务器 - 测试显示服务器正常
       category: "web_operations"
+    
+    sequential-thinking: 
+      type: "stdio"
+      command: "npx"
+      args: ["-y","@modelcontextprotocol/server-sequential-thinking"]
+      description: "Sequential thinking operations"
+      enabled: true  # 启用Sequential Thinking服务器
+      category: "utility_operations"  
+
+    time:
+      type: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-time"]
+      description: "Time operations"
+      enabled: true  # 启用Time服务器
+      category: "utility_operations"
 
 logging:
-  level: "DEBUG"
+  level: "INFO"
   format: "structured"
   file: "${LOG_FILE:./logs/development.log}"
 
