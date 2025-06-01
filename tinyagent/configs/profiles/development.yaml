@@ -10,8 +10,35 @@ llm:
   active_provider: "openrouter"  # 引用 defaults/llm_providers.yaml 中的定义
 
 mcp:
-  enabled: false  # 暂时禁用MCP以专注于LLM功能
-  auto_discover: false
+  enabled: true   # 启用MCP功能用于工具集成
+  auto_discover: true
+  servers:
+    filesystem:
+      type: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      env: {}
+      description: "File system operations (read, write, list directories)"
+      enabled: true
+      category: "file_operations"
+
+    fetch:
+      type: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-fetch"]
+      env: {}
+      description: "HTTP requests and web content fetching"
+      enabled: false  # 暂时禁用，连接有问题
+      category: "web_operations"
+
+    sqlite:
+      type: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-sqlite", "./data/tinyagent.db"]
+      env: {}
+      description: "SQLite database operations"
+      enabled: false  # 暂时禁用，连接有问题
+      category: "database_operations"
 
 logging:
   level: "DEBUG"

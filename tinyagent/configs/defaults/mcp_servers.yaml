@@ -26,8 +26,16 @@ servers:
     args: ["-y", "@modelcontextprotocol/server-sqlite", "./data/tinyagent.db"]
     env: {}
     description: "SQLite database operations"
-    enabled: false
+    enabled: true
     category: "database_operations"
+
+  my-search:
+    type: "sse"
+    url: "http://localhost:8081/sse"
+    env: {}
+    description: "Search the web via google and get content from web"
+    enabled: false  # 暂时禁用，因为需要外部服务
+    category: "web_operations"
 
 # Server categories for organization
 categories:

@@ -358,20 +358,125 @@ class TinyAgent:
             Agent execution result
         """
         try:
-            agent = self.get_agent()
-            self.logger.info(f"Running agent with message: {message[:100]}...")
-            
-            result = await Runner.run(
-                starting_agent=agent,
-                input=message,
-                **kwargs
-            )
-            
-            self.logger.info("Agent execution completed successfully")
-            return result
+            # 如果有MCP服务器，需要在async with语句中连接它们
+            if self.mcp_servers:
+                return await self._run_with_mcp_servers(message, **kwargs)
+            else:
+                # 没有MCP服务器，直接运行
+                agent = self.get_agent()
+                self.logger.info(f"Running agent with message: {message[:100]}...")
+                
+                result = await Runner.run(
+                    starting_agent=agent,
+                    input=message,
+                    **kwargs
+                )
+                
+                self.logger.info("Agent execution completed successfully")
+                return result
             
         except Exception as e:
             self.logger.error(f"Agent execution failed: {e}")
+            raise
+
+    async def _run_with_mcp_servers(self, message: str, **kwargs) -> Any:
+        """
+        Run the agent with MCP servers properly connected.
+        
+        Args:
+            message: Input message for the agent
+            **kwargs: Additional arguments passed to Runner.run
+            
+        Returns:
+            Agent execution result
+        """
+        from agents.mcp import MCPServerStdio, MCPServerSse, MCPServerStreamableHttp
+        
+        # 收集所有需要连接的MCP服务器
+        server_contexts = []
+        connected_servers = []
+        
+        try:
+            # 为每个MCP服务器创建连接上下文
+            for server_config in self.mcp_manager.server_configs:
+                if not server_config.enabled:
+                    continue
+                    
+                if server_config.type == "stdio":
+                    server = MCPServerStdio(
+                        name=server_config.name,
+                        params={
+                            "command": server_config.command,
+                            "args": server_config.args or [],
+                            "env": server_config.env or {}
+                        }
+                    )
+                    server_contexts.append(server)
+                elif server_config.type == "sse":
+                    server = MCPServerSse(
+                        name=server_config.name,
+                        params={
+                            "url": server_config.url,
+                            "headers": server_config.headers or {}
+                        }
+                    )
+                    server_contexts.append(server)
+                elif server_config.type == "http":
+                    server = MCPServerStreamableHttp(
+                        name=server_config.name,
+                        params={
+                            "url": server_config.url,
+                            "headers": server_config.headers or {}
+                        }
+                    )
+                    server_contexts.append(server)
+            
+            # 连接所有MCP服务器
+            if server_contexts:
+                # 使用嵌套的async with语句连接所有服务器
+                async def connect_servers(servers, index=0):
+                    if index >= len(servers):
+                        # 所有服务器都已连接，创建Agent并运行
+                        agent = Agent(
+                            name=self.config.agent.name,
+                            instructions=self.instructions,
+                            model=self._create_model_instance(self.model_name),
+                            mcp_servers=connected_servers
+                        )
+                        
+                        self.logger.info(f"Running agent with {len(connected_servers)} connected MCP servers")
+                        
+                        result = await Runner.run(
+                            starting_agent=agent,
+                            input=message,
+                            **kwargs
+                        )
+                        
+                        self.logger.info("Agent execution completed successfully")
+                        return result
+                    else:
+                        # 连接下一个服务器
+                        async with servers[index] as server:
+                            connected_servers.append(server)
+                            return await connect_servers(servers, index + 1)
+                
+                return await connect_servers(server_contexts)
+            else:
+                # 没有启用的MCP服务器，直接运行
+                agent = self.get_agent()
+                self.logger.info(f"Running agent with message: {message[:100]}...")
+                
+                result = await Runner.run(
+                    starting_agent=agent,
+                    input=message,
+                    **kwargs
+                )
+                
+                self.logger.info("Agent execution completed successfully")
+                return result
+                
+        except Exception as e:
+            self.logger.error(f"Failed to run agent with MCP servers: {e}")
             raise
     
     def run_sync(self, message: str, **kwargs) -> Any:
@@ -386,17 +491,23 @@ class TinyAgent:
             Agent execution result
         """
         try:
-            agent = self.get_agent()
-            self.logger.info(f"Running agent synchronously with message: {message[:100]}...")
-            
-            result = Runner.run_sync(
-                starting_agent=agent,
-                input=message,
-                **kwargs
-            )
-            
-            self.logger.info("Agent execution completed successfully")
-            return result
+            # 如果有MCP服务器，需要使用异步方法
+            if self.mcp_servers:
+                import asyncio
+                return asyncio.run(self.run(message, **kwargs))
+            else:
+                # 没有MCP服务器，可以直接使用同步方法
+                agent = self.get_agent()
+                self.logger.info(f"Running agent synchronously with message: {message[:100]}...")
+                
+                result = Runner.run_sync(
+                    starting_agent=agent,
+                    input=message,
+                    **kwargs
+                )
+                
+                self.logger.info("Agent execution completed successfully")
+                return result
             
         except Exception as e:
             self.logger.error(f"Agent execution failed: {e}")
