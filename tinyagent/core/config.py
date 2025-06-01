@@ -30,6 +30,7 @@ class AgentConfig:
     name: str = "TinyAgent"
     instructions_file: str = "prompts/default_instructions.txt"
     max_iterations: int = 10
+    use_streaming: bool = True  # 是否使用流式API进行工具调用日志记录
 
 
 @dataclass
@@ -285,7 +286,8 @@ class ConfigurationManager:
             config.agent = AgentConfig(
                 name=agent_data.get('name', config.agent.name),
                 instructions_file=agent_data.get('instructions_file', config.agent.instructions_file),
-                max_iterations=agent_data.get('max_iterations', config.agent.max_iterations)
+                max_iterations=agent_data.get('max_iterations', config.agent.max_iterations),
+                use_streaming=agent_data.get('use_streaming', config.agent.use_streaming)
             )
         
         # Parse LLM configuration

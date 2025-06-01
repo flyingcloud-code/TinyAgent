@@ -23,19 +23,37 @@ servers:
   sqlite:
     type: "stdio"
     command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-sqlite", "./data/tinyagent.db"]
+    args: ["-y", "mcp-sqlite", "./data/tinyagent.db"]
     env: {}
     description: "SQLite database operations"
-    enabled: true
+    enabled: false  # 包在Windows上有安装问题，暂时禁用
     category: "database_operations"
-
+    
   my-search:
     type: "sse"
     url: "http://localhost:8081/sse"
     env: {}
     description: "Search the web via google and get content from web"
-    enabled: true
+    enabled: false  # 启用SSE服务器 - 测试显示服务器正常
     category: "web_operations"
+    
+  sequential-thinking: 
+    type: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    env: {}
+    description: "Sequential thinking operations"
+    enabled: true  # 启用Sequential Thinking服务器
+    category: "utility_operations"  
+
+  time:
+    type: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-time"]
+    env: {}
+    description: "Time operations"
+    enabled: false  # 启用Time服务器
+    category: "utility_operations"
 
 # Server categories for organization
 categories:

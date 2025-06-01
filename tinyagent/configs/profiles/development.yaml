@@ -1,68 +1,25 @@
 # Development Profile Configuration
-# 优化的开发环境配置 - 只引用资源，不重复定义
+# 开发环境配置 - 只引用资源，不重复定义
 
 agent:
   name: "TinyAgent-Dev"
   instructions_file: "prompts/default_instructions.txt"
   max_iterations: 5
+  use_streaming: true  # 是否使用流式API进行工具调用日志记录
 
 llm:
   active_provider: "openrouter"  # 引用 defaults/llm_providers.yaml 中的定义
 
 mcp:
-  enabled: true   # 启用MCP功能用于工具集成
+  enabled: true
   auto_discover: true
-  servers:
-    filesystem:
-      type: "stdio"
-      command: "npx"
-      args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
-      env: {}
-      description: "File system operations (read, write, list directories)"
-      enabled: true
-      category: "file_operations"
-
-    fetch:
-      type: "stdio"
-      command: "node"
-      args: ["C:\\work\\github\\fetch-mcp\\dist\\index.js"]
-      env: {}
-      description: "HTTP requests and web content fetching"
-      enabled: true  # 启用进行测试
-      category: "web_operations"
-
-    sqlite:
-      type: "stdio"
-      command: "npx"
-      args: ["-y", "mcp-sqlite", "./data/tinyagent.db"]
-      env: {}
-      description: "SQLite database operations"
-      enabled: false  # 包在Windows上有安装问题，暂时禁用
-      category: "database_operations"
-    
-    my-search:
-      type: "sse"
-      url: "http://localhost:8081/sse"
-      env: {}
-      description: "Search the web via google and get content from web"
-      enabled: true  # 启用SSE服务器 - 测试显示服务器正常
-      category: "web_operations"
-    
-    sequential-thinking: 
-      type: "stdio"
-      command: "npx"
-      args: ["-y","@modelcontextprotocol/server-sequential-thinking"]
-      description: "Sequential thinking operations"
-      enabled: true  # 启用Sequential Thinking服务器
-      category: "utility_operations"  
-
-    time:
-      type: "stdio"
-      command: "npx"
-      args: ["-y", "@modelcontextprotocol/server-time"]
-      description: "Time operations"
-      enabled: true  # 启用Time服务器
-      category: "utility_operations"
+  # 开发环境启用的服务器
+  enabled_servers:
+    - "filesystem"
+    - "fetch"
+    - "sequential-thinking"
+    # - "time"
+    # - "my-search"
 
 logging:
   level: "INFO"

@@ -63,18 +63,21 @@ from ..mcp.manager import MCPServerManager
 
 logger = logging.getLogger(__name__)
 
-# Create specialized logger for MCP tool calls
+# Create specialized logger for MCP tool calls - with better duplicate prevention
 mcp_tool_logger = logging.getLogger('tinyagent.mcp.tools')
-mcp_tool_logger.setLevel(logging.INFO)
+mcp_tool_logger.setLevel(logging.INFO)  # Restore normal INFO level
 
-# Add handler if not already present
-if not mcp_tool_logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    handler.setFormatter(formatter)
-    mcp_tool_logger.addHandler(handler)
+# Clear any existing handlers to prevent duplicates
+mcp_tool_logger.handlers.clear()
+
+# Add a single handler
+handler = logging.StreamHandler()
+formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+handler.setFormatter(formatter)
+mcp_tool_logger.addHandler(handler)
+mcp_tool_logger.propagate = False  # Prevent propagation to root logger
 
 # Global list to track OpenAI clients for cleanup
 _openai_clients = []
@@ -152,13 +155,20 @@ def log_tool_call_stats():
         mcp_tool_logger.info("No MCP tool calls were made during this run")
         mcp_tool_logger.info("=== End Summary ===")
 
+# Add a simple result wrapper class after the imports
+class SimpleResult:
+    """Simple result wrapper for compatibility with final_output attribute access"""
+    def __init__(self, output: str):
+        self.final_output = output
+
 class MCPToolCallLogger:
     """Custom wrapper to log MCP tool calls and their input/output"""
     
-    def __init__(self, original_agent, server_name_map=None):
+    def __init__(self, original_agent, server_name_map=None, use_streaming=True):
         self.original_agent = original_agent
         self.server_name_map = server_name_map or {}
         self.call_count = 0
+        self.use_streaming = use_streaming
         
     def __getattr__(self, name):
         """Delegate all attributes to the original agent"""
@@ -170,8 +180,16 @@ class MCPToolCallLogger:
         start_time = time.time()
         
         try:
-            # Create wrapper for Runner.run that captures tool calls
-            result = await self._run_with_tool_logging(input_data, **kwargs)
+            if self.use_streaming:
+                # Use streaming API with tool call logging
+                result = await self._run_with_tool_logging(input_data, **kwargs)
+            else:
+                # Use non-streaming API
+                result = await Runner.run(
+                    starting_agent=self.original_agent,
+                    input=input_data,
+                    **kwargs
+                )
             
             duration = time.time() - start_time
             mcp_tool_logger.info(f"✅ Agent run completed successfully in {duration:.2f}s")
@@ -284,9 +302,9 @@ class MCPToolCallLogger:
             return final_result
         except AttributeError:
             # Handle API compatibility issue - RunResultStreaming might not have result() method
-            # In this case, we'll return a simple success indicator
+            # In this case, we'll return a compatible result wrapper
             mcp_tool_logger.warning("Unable to get final result from streaming API, returning success indicator")
-            return "MCP tool calls completed successfully"
+            return SimpleResult("MCP tool calls completed successfully")
 
 class TinyAgent:
     """
@@ -302,7 +320,8 @@ class TinyAgent:
         config: Optional[TinyAgentConfig] = None,
         instructions: Optional[str] = None,
         model_name: Optional[str] = None,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        use_streaming: Optional[bool] = None
     ):
         """
         Initialize TinyAgent.
@@ -312,6 +331,7 @@ class TinyAgent:
             instructions: Custom instructions for the agent
             model_name: Model to use (overrides config)
             api_key: OpenAI API key (overrides environment)
+            use_streaming: Whether to use streaming API for tool call logging (default: from config)
         """
         if not AGENTS_AVAILABLE:
             raise ImportError("OpenAI Agents SDK is required but not available")
@@ -321,6 +341,8 @@ class TinyAgent:
             config = get_config()
         
         self.config = config
+        # Use provided use_streaming, otherwise use config value
+        self.use_streaming = use_streaming if use_streaming is not None else config.agent.use_streaming
         self.logger = logging.getLogger(__name__)
         
         # Set up API key
@@ -360,7 +382,7 @@ class TinyAgent:
             'total_duration': 0.0
         }
         
-        self.logger.info(f"TinyAgent initialized with {len(self.mcp_servers)} MCP servers")
+        self.logger.info(f"TinyAgent initialized with {len(self.mcp_servers)} MCP servers (streaming: {self.use_streaming})")
     
     def _should_use_litellm(self, model_name: str) -> bool:
         """
@@ -605,70 +627,24 @@ class TinyAgent:
         """
         from agents.mcp import MCPServerStdio, MCPServerSse, MCPServerStreamableHttp
         
-        # 收集所有需要连接的MCP服务器
-        server_contexts = []
+        # 收集所有需要连接的服务器实例
+        server_instances = []
         
         try:
-            # 为每个MCP服务器创建连接上下文
+            # 为每个MCP服务器创建实例
             for server_config in self.mcp_manager.server_configs:
                 if not server_config.enabled:
                     continue
                     
                 try:
-                    if server_config.type == "stdio":
-                        server = MCPServerStdio(
-                            name=server_config.name,
-                            params={
-                                "command": server_config.command,
-                                "args": server_config.args or [],
-                                "env": server_config.env or {}
-                            }
-                        )
-                        server_contexts.append(server)
-                        self.logger.debug(f"Created stdio MCP server: {server_config.name}")
-                        
-                    elif server_config.type == "sse":
-                        # 构建SSE服务器参数
-                        sse_params = {
-                            "url": server_config.url,
-                            "headers": server_config.headers or {}
-                        }
-                        
-                        # 添加超时参数
-                        if server_config.timeout is not None:
-                            sse_params["timeout"] = server_config.timeout
-                        else:
-                            sse_params["timeout"] = 30  # 默认30秒超时
-                            
-                        if server_config.sse_read_timeout is not None:
-                            sse_params["sse_read_timeout"] = server_config.sse_read_timeout
-                        else:
-                            sse_params["sse_read_timeout"] = 60  # 默认60秒SSE读取超时
-                        
-                        server = MCPServerSse(
-                            name=server_config.name,
-                            params=sse_params
-                        )
-                        server_contexts.append(server)
-                        self.logger.debug(f"Created SSE MCP server: {server_config.name} with URL: {server_config.url}")
-                        
-                    elif server_config.type == "http":
-                        server = MCPServerStreamableHttp(
-                            name=server_config.name,
-                            params={
-                                "url": server_config.url,
-                                "headers": server_config.headers or {}
-                            }
-                        )
-                        server_contexts.append(server)
-                        self.logger.debug(f"Created HTTP MCP server: {server_config.name}")
-                        
+                    server_instance = self._create_server_instance(server_config)
+                    if server_instance:
+                        server_instances.append(server_instance)
                 except Exception as e:
-                    self.logger.warning(f"Failed to create MCP server {server_config.name}: {e}")
+                    self.logger.error(f"Failed to create MCP server {server_config.name}: {e}")
                     continue
             
-            # 如果没有可用的服务器，直接运行
-            if not server_contexts:
+            if not server_instances:
                 self.logger.info("No MCP servers available, running without tools")
                 agent = self.get_agent()
                 
@@ -681,100 +657,162 @@ class TinyAgent:
                 self.logger.info("Agent execution completed successfully")
                 return result
             
-            # 连接所有MCP服务器并运行Agent
-            return await self._connect_and_run_servers(server_contexts, message, **kwargs)
+            # 使用async with来管理所有服务器的连接
+            return await self._run_with_connected_servers(server_instances, message, **kwargs)
                 
         except Exception as e:
             self.logger.error(f"Failed to run agent with MCP servers: {e}")
             raise
     
-    async def _connect_and_run_servers(self, server_contexts: List[Any], message: str, **kwargs) -> Any:
+    def _create_server_instance(self, server_config):
         """
-        递归连接MCP服务器并运行Agent，确保正确的资源管理。
+        创建MCP服务器实例（不连接）
         
         Args:
-            server_contexts: MCP服务器上下文列表
+            server_config: MCP服务器配置
+            
+        Returns:
+            MCP服务器实例
+        """
+        from agents.mcp import MCPServerStdio, MCPServerSse, MCPServerStreamableHttp
+        
+        try:
+            if server_config.type == "stdio":
+                return MCPServerStdio(
+                    name=server_config.name,
+                    params={
+                        "command": server_config.command,
+                        "args": server_config.args or [],
+                        "env": server_config.env or {}
+                    }
+                )
+                
+            elif server_config.type == "sse":
+                # 构建SSE服务器参数
+                sse_params = {
+                    "url": server_config.url,
+                    "headers": server_config.headers or {}
+                }
+                
+                # 添加超时参数
+                if server_config.timeout is not None:
+                    sse_params["timeout"] = server_config.timeout
+                else:
+                    sse_params["timeout"] = 30  # 默认30秒超时
+                    
+                if server_config.sse_read_timeout is not None:
+                    sse_params["sse_read_timeout"] = server_config.sse_read_timeout
+                else:
+                    sse_params["sse_read_timeout"] = 60  # 默认60秒SSE读取超时
+                
+                return MCPServerSse(
+                    name=server_config.name,
+                    params=sse_params
+                )
+                
+            elif server_config.type == "http":
+                return MCPServerStreamableHttp(
+                    name=server_config.name,
+                    params={
+                        "url": server_config.url,
+                        "headers": server_config.headers or {}
+                    }
+                )
+            else:
+                raise ValueError(f"Unknown server type: {server_config.type}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to create MCP server {server_config.name}: {e}")
+            return None
+    
+    async def _run_with_connected_servers(self, server_instances, message: str, **kwargs):
+        """
+        使用连接的服务器运行Agent
+        
+        Args:
+            server_instances: MCP服务器实例列表
             message: 输入消息
             **kwargs: 传递给Runner.run的额外参数
             
         Returns:
             Agent执行结果
         """
-        connected_servers = []
-        
-        async def connect_servers_recursive(servers, index=0):
-            """递归连接服务器的内部函数"""
-            if index >= len(servers):
-                # 所有服务器都已连接，创建Agent并运行
+        async def connect_and_run():
+            connected_servers = []
+            
+            # 尝试连接所有服务器
+            for server_instance in server_instances:
                 try:
-                    agent = Agent(
-                        name=self.config.agent.name,
-                        instructions=self.instructions,
-                        model=self._create_model_instance(self.model_name),
-                        mcp_servers=connected_servers
-                    )
+                    # 这里我们不使用async with，而是手动管理连接
+                    # 因为我们需要将连接的服务器传递给Agent
+                    await server_instance.connect()
+                    connected_servers.append(server_instance)
+                    server_name = getattr(server_instance, 'name', 'unknown')
+                    self.logger.info(f"Successfully connected to MCP server: {server_name}")
                     
-                    # 包装agent以启用详细的MCP工具调用日志记录
-                    logged_agent = MCPToolCallLogger(agent)
+                    # 添加到全局清理列表
+                    _active_servers.append(server_instance)
                     
-                    self.logger.info(f"Running agent with {len(connected_servers)} connected MCP servers")
-                    mcp_tool_logger.info(f"🎯 Starting MCP-enabled agent run with {len(connected_servers)} servers:")
-                    for server in connected_servers:
+                except Exception as e:
+                    server_name = getattr(server_instance, 'name', 'unknown')
+                    self.logger.error(f"Failed to connect to MCP server {server_name}: {e}")
+                    continue
+            
+            if not connected_servers:
+                self.logger.warning("No MCP servers connected, falling back to running agent without tools")
+                agent = self.get_agent()
+                
+                result = await Runner.run(
+                    starting_agent=agent,
+                    input=message,
+                    **kwargs
+                )
+                
+                self.logger.info("Agent execution completed successfully (fallback mode)")
+                return result
+            
+            try:
+                # 创建Agent并运行
+                self.logger.info(f"Creating agent with {len(connected_servers)} connected MCP servers")
+                
+                agent = Agent(
+                    name=self.config.agent.name,
+                    instructions=self.instructions,
+                    model=self._create_model_instance(self.model_name),
+                    mcp_servers=connected_servers
+                )
+                
+                # 包装Agent以启用详细的MCP工具调用日志记录
+                logged_agent = MCPToolCallLogger(agent, use_streaming=self.use_streaming)
+                
+                mcp_tool_logger.info(f"🎯 Starting MCP-enabled agent run with {len(connected_servers)} servers:")
+                for server in connected_servers:
+                    server_name = getattr(server, 'name', 'unknown')
+                    mcp_tool_logger.info(f"    - {server_name}")
+                
+                # 运行包装的代理，它会自动记录工具调用
+                result = await logged_agent.run(message, **kwargs)
+                
+                self.logger.info("Agent execution completed successfully")
+                return result
+                
+            finally:
+                # 清理连接的服务器
+                for server in connected_servers:
+                    try:
+                        await server.close()
+                    except Exception as e:
                         server_name = getattr(server, 'name', 'unknown')
-                        mcp_tool_logger.info(f"    - {server_name}")
-                    
-                    # 使用包装的agent运行，这将自动记录所有工具调用
-                    result = await logged_agent.run(message, **kwargs)
-                    
-                    self.logger.info("Agent execution completed successfully")
-                    return result
-                    
-                except Exception as e:
-                    self.logger.error(f"Failed to run agent: {e}")
-                    raise
-            else:
-                # 连接当前服务器
-                current_server = servers[index]
-                try:
-                    self.logger.debug(f"Connecting to MCP server: {current_server.name}")
-                    
-                    async with current_server as server:
-                        # 添加到活跃服务器列表用于清理
-                        _active_servers.append(server)
-                        connected_servers.append(server)
-                        
-                        self.logger.info(f"Successfully connected to MCP server: {current_server.name}")
-                        
-                        # 递归连接下一个服务器
-                        try:
-                            result = await connect_servers_recursive(servers, index + 1)
-                            return result
-                        finally:
-                            # 清理：从活跃服务器列表中移除
-                            if server in _active_servers:
-                                _active_servers.remove(server)
-                                
-                except Exception as e:
-                    self.logger.error(f"Failed to connect to MCP server {current_server.name}: {e}")
-                    # 连接失败，继续尝试下一个服务器
-                    return await connect_servers_recursive(servers, index + 1)
+                        self.logger.debug(f"Error closing server {server_name}: {e}")
         
-        try:
-            return await connect_servers_recursive(server_contexts)
-        except Exception as e:
-            self.logger.error(f"All MCP server connections failed: {e}")
-            # 如果所有服务器都连接失败，直接运行没有MCP工具的Agent
-            self.logger.info("Falling back to running agent without MCP tools")
-            
-            agent = self.get_agent()
-            result = await Runner.run(
-                starting_agent=agent,
-                input=message,
-                **kwargs
-            )
-            
-            self.logger.info("Agent execution completed successfully (fallback mode)")
-            return result
+        return await connect_and_run()
+
+    async def _connect_single_server(self, server_config):
+        """
+        连接单个MCP服务器 - 已弃用，使用_create_server_instance和_run_with_connected_servers代替
+        """
+        # 这个方法已经不再使用，保留以防兼容性问题
+        pass
     
     def run_sync(self, message: str, **kwargs) -> Any:
         """
