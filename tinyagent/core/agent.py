@@ -438,15 +438,29 @@ class TinyAgent:
                         self.logger.debug(f"Created stdio MCP server: {server_config.name}")
                         
                     elif server_config.type == "sse":
+                        # 构建SSE服务器参数
+                        sse_params = {
+                            "url": server_config.url,
+                            "headers": server_config.headers or {}
+                        }
+                        
+                        # 添加超时参数
+                        if server_config.timeout is not None:
+                            sse_params["timeout"] = server_config.timeout
+                        else:
+                            sse_params["timeout"] = 30  # 默认30秒超时
+                            
+                        if server_config.sse_read_timeout is not None:
+                            sse_params["sse_read_timeout"] = server_config.sse_read_timeout
+                        else:
+                            sse_params["sse_read_timeout"] = 60  # 默认60秒SSE读取超时
+                        
                         server = MCPServerSse(
                             name=server_config.name,
-                            params={
-                                "url": server_config.url,
-                                "headers": server_config.headers or {}
-                            }
+                            params=sse_params
                         )
                         server_contexts.append(server)
-                        self.logger.debug(f"Created SSE MCP server: {server_config.name}")
+                        self.logger.debug(f"Created SSE MCP server: {server_config.name} with URL: {server_config.url}")
                         
                     elif server_config.type == "http":
                         server = MCPServerStreamableHttp(

@@ -45,7 +45,7 @@ mcp:
       url: "http://localhost:8081/sse"
       env: {}
       description: "Search the web via google and get content from web"
-      enabled: false  # 暂时禁用，需要外部服务
+      enabled: true  # 启用SSE服务器 - 测试显示服务器正常
       category: "web_operations"
 
 logging:
