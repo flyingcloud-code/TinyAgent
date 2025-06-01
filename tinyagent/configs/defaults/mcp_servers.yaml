@@ -1,0 +1,55 @@
+# MCP Servers Default Configuration
+# Default MCP server definitions and categories
+
+servers:
+  filesystem:
+    type: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    env: {}
+    description: "File system operations (read, write, list directories)"
+    enabled: true
+    category: "file_operations"
+
+  fetch:
+    type: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-fetch"]
+    env: {}
+    description: "HTTP requests and web content fetching"
+    enabled: true
+    category: "web_operations"
+
+  sqlite:
+    type: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-sqlite", "./data/tinyagent.db"]
+    env: {}
+    description: "SQLite database operations"
+    enabled: false
+    category: "database_operations"
+
+# Server categories for organization
+categories:
+  file_operations:
+    description: "File system and document operations"
+    priority: "high"
+    
+  web_operations:
+    description: "Web requests and content fetching"
+    priority: "medium"
+    
+  database_operations:
+    description: "Database queries and operations"
+    priority: "low"
+    
+  utility_operations:
+    description: "General utility tools"
+    priority: "low"
+
+# MCP client settings
+client:
+  timeout: 30
+  max_retries: 3
+  tool_cache_duration: 300
+  max_tools_per_server: 50 

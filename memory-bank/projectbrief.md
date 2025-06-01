@@ -1,7 +1,7 @@
 # Project Brief: TinyAgent
 *Version: 1.0*
-*Created: PLACEHOLDER_DATE*
-*Last Updated: PLACEHOLDER_DATE*
+*Created: 2025-05-31*
+*Last Updated: 2025-05-31*
 
 ## Project Overview
 TinyAgent is a general-purpose, multi-step agent framework designed to be extensible via Model Context Protocol (MCP) tools. It will initially focus on assisting with user needs analysis and generating various forms of documentation within a corporate environment. The project aims to provide a flexible and powerful platform for automating complex, multi-step tasks, creating an intelligent agent capable of understanding user needs, planning complex tasks, executing them using a variety of tools (via MCP), and iteratively refining its approach.

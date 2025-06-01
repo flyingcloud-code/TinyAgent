@@ -1,0 +1,42 @@
+# LLM Providers Default Configuration
+# Default settings for all supported LLM providers
+
+providers:
+  openai:
+    model: "gpt-4"
+    api_key_env: "OPENAI_API_KEY"
+    base_url: "https://api.openai.com/v1"
+    max_tokens: 2000
+    temperature: 0.7
+
+  openrouter:
+    model: "anthropic/claude-3.5-sonnet"
+    api_key_env: "OPENROUTER_API_KEY"
+    base_url: "https://openrouter.ai/api/v1"
+    max_tokens: 2000
+    temperature: 0.7
+    extra_headers:
+      HTTP-Referer: "https://github.com/your-org/tinyagent"
+      X-Title: "TinyAgent"
+
+  local_llm:
+    model: "llama2"
+    api_key_env: ""
+    base_url: "http://localhost:11434"
+    max_tokens: 2000
+    temperature: 0.7
+
+  azure:
+    model: "gpt-4"
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    base_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2023-12-01-preview"
+    max_tokens: 2000
+    temperature: 0.7
+
+# Default settings applied to all providers
+defaults:
+  timeout: 30
+  retry_attempts: 3
+  max_tokens: 2000
+  temperature: 0.7 

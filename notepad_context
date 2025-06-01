@@ -1,0 +1,111 @@
+Notepad Name: envsetup
+## Basic Environment
+- You are under windows OS, not linux. 
+- Your default shell is windows commandline
+- uv tool is intalled
+- .venv installed at project root folder
+- .venv\Script\Actiavate to activate python
+- uv pip install <<package>> to get expected module
+### trouble shoot
+Some times you on in conda env of "ak_dev", need to follow below instruciton to use local .venv.
+after that you can get into correct env
+```
+(ak_dev) PS C:\work\github\TinyAgent> conda deactivate
+(base) PS C:\work\github\TinyAgent> .\.venv\Scripts\activate
+(base) (TinyAgent) PS C:\work\github\TinyAgent> uv pip list | findstr openai
+openai                        1.82.1
+openai-agents                 0.0.16
+(base) (TinyAgent) PS C:\work\github\TinyAgent> python --version
+Python 3.11.11
+```
+## set up cursor rules
+- **only need setup once**
+- [x] Current Status: **Completed*
+- cd c:\wyang11\github\TinyAgent
+- mkdir -p .cursor
+- cp ../CursorRIPER/src/.cursor ./
+- for file in *.md; do mv "$file" "${file%.md}.mdc"; done
+
+## How to get latest date
+- Under power shell, execute command: date
+- Under windows command, execute command: date /T
+
+## Context 7 MCP usage
+- for open agent sdk, search: "OpenAI Agents Python"
+- for offical openai python module, search: OpenAI Python
+
+## TinyAgent Configuration System (Updated 2025-06-01)
+### New Hierarchical Configuration Architecture
+TinyAgent now uses a sophisticated hierarchical configuration system with the following priority order:
+1. **Environment Variables (.env file)** - HIGHEST PRIORITY
+2. **User Configuration (config/)** - HIGH PRIORITY  
+3. **Profile Configurations (profiles/)** - MEDIUM PRIORITY
+4. **Default Configurations (defaults/)** - LOWEST PRIORITY
+
+### Configuration Directory Structure
+```
+tinyagent/configs/
+├── defaults/                    # Default configs (read-only, shipped with code)
+│   ├── agent.yaml              # Agent default settings
+│   ├── llm_providers.yaml      # LLM provider defaults
+│   └── mcp_servers.yaml        # MCP server defaults
+├── profiles/                    # Profile configs (examples and templates)
+│   ├── development.yaml        # Development environment
+│   ├── production.yaml         # Production environment
+│   ├── openrouter.yaml         # OpenRouter example
+│   └── local_llm.yaml          # Local LLM example
+├── config/                      # User custom configs (highest priority)
+│   ├── agent.yaml              # User agent config
+│   ├── llm.yaml                # User LLM config
+│   └── mcp.yaml                # User MCP config
+└── env.template                # Environment variables template
+```
+
+### Environment Variables Setup
+1. **Copy template**: `cp tinyagent/configs/env.template .env`
+2. **Edit .env file** with your actual values:
+   ```bash
+   # Required - choose your LLM provider
+   OPENAI_API_KEY=your-openai-api-key-here
+   # OR
+   OPENROUTER_API_KEY=your-openrouter-api-key-here
+   
+   # Optional settings
+   TINYAGENT_PROFILE=development
+   TINYAGENT_ROOT=C:/work/github/TinyAgent
+   LOG_LEVEL=INFO
+   ```
+
+### Using Profiles
+- **Default profile**: `development` (automatic)
+- **Set via environment**: `export TINYAGENT_PROFILE=production`
+- **Set via CLI**: `python -m tinyagent --profile production status`
+- **List available profiles**: `python -m tinyagent list-profiles`
+
+### Key Configuration Commands
+```bash
+# Check status with default profile
+python -m tinyagent status
+
+# Check status with specific profile
+python -m tinyagent status --profile production
+
+# List available profiles
+python -m tinyagent list-profiles
+
+# Use verbose mode for detailed info
+python -m tinyagent status -v
+
+# Run with specific profile
+python -m tinyagent --profile openrouter run "Hello"
+```
+
+### Dependencies Added
+- **python-dotenv**: For .env file support
+- Already installed via: `uv pip install python-dotenv`
+
+### Migration Notes
+- Old configuration files remain supported for backward compatibility
+- New hierarchical system takes precedence when available
+- `.env` file is optional but recommended for sensitive data
+- Profile system allows easy switching between environments 

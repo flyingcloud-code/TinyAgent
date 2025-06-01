@@ -1,0 +1,40 @@
+# Production Profile Configuration
+# Optimized for production deployment
+
+agent:
+  name: "TinyAgent-Prod"
+  max_iterations: 20
+
+llm:
+  active_provider: "openrouter"
+
+mcp:
+  enabled: true
+  auto_discover: true
+  servers:
+    filesystem:
+      enabled: true
+      type: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "${TINYAGENT_ROOT:/opt/tinyagent}"]
+      description: "File system operations (read, write, list directories)"
+      category: "file_operations"
+    fetch:
+      enabled: true
+      type: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-fetch"]
+      description: "HTTP requests and web content fetching"
+      category: "web_operations"
+    sqlite:
+      enabled: true
+      type: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-sqlite", "${TINYAGENT_DB:/var/lib/tinyagent/data.db}"]
+      description: "SQLite database operations"
+      category: "database_operations"
+
+logging:
+  level: "INFO"
+  format: "structured"
+  file: "${LOG_FILE:/var/log/tinyagent/tinyagent.log}" 

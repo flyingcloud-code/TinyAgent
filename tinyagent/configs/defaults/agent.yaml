@@ -1,0 +1,23 @@
+# TinyAgent Default Configuration
+# This file contains the default settings for TinyAgent
+
+agent:
+  name: "TinyAgent"
+  instructions_file: "prompts/default_instructions.txt"
+  max_iterations: 10
+
+llm:
+  active_provider: "openrouter"
+
+mcp:
+  auto_discover: true
+  enabled: true
+
+logging:
+  level: "INFO"
+  format: "structured"
+  file: null
+
+environment:
+  env_file: ".env"
+  env_prefix: "TINYAGENT_" 

@@ -1,0 +1,33 @@
+# Development Profile Configuration
+# Optimized for development and testing
+
+agent:
+  name: "TinyAgent-Dev"
+  max_iterations: 5
+
+# Let llm use the default active_provider from defaults/agent.yaml
+
+mcp:
+  enabled: true
+  auto_discover: true
+  servers:
+    filesystem:
+      enabled: true
+      type: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "${TINYAGENT_ROOT:.}"]
+      description: "File system operations (read, write, list directories)"
+      category: "file_operations"
+    fetch:
+      enabled: true
+      type: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-fetch"]
+      description: "HTTP requests and web content fetching"
+      category: "web_operations"
+    sqlite:
+      enabled: false
+
+logging:
+  level: "DEBUG"
+  format: "structured" 
