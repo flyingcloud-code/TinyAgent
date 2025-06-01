@@ -1,8 +1,8 @@
 # TinyAgent Requirements
 # Core dependencies for the TinyAgent framework
 
-# OpenAI Agents SDK
-openai-agents>=0.0.16
+# OpenAI Agents SDK with LiteLLM support
+openai-agents[litellm]>=0.0.16
 
 # Configuration and Environment
 pyyaml>=6.0
@@ -23,8 +23,8 @@ flake8>=6.0.0
 # MCP integration (if available, otherwise implement custom)
 # openai-agents-mcp>=0.1.0
 
-# LLM providers support
-litellm>=1.0.0
+# LLM providers support (included in openai-agents[litellm])
+# litellm>=1.0.0
 
 # Logging and debugging
 structlog>=23.1.0

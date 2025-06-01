@@ -1,29 +1,34 @@
 # System Patterns: TinyAgent
-*Version: 1.0*
+*Version: 1.1*
 *Created: 2025-05-31*
 *Last Updated: 2025-06-01*
 
 ## Architecture Overview
-TinyAgent employs a modular architecture centered around a core agent engine built with Python and the `openai-agents-python` SDK. The agent operates on a ReAct (Reasoning and Acting) loop, with future provisions for a Reflect mechanism. Extensibility is a key design principle, achieved through configurable LLM providers, externalized prompts, and a robust Model Context Protocol (MCP) integration for tool use. The initial interaction is via a Command-Line Interface (CLI).
+TinyAgent employs a modular architecture centered around a core agent engine built with Python and the `openai-agents-python` SDK. The agent operates on a ReAct (Reasoning and Acting) loop, with future provisions for a Reflect mechanism. A key architectural innovation is the **multi-model LLM support layer** using LiteLLM, enabling seamless integration with 100+ LLM providers while maintaining a unified interface. Extensibility is achieved through configurable LLM providers, externalized prompts, and robust Model Context Protocol (MCP) integration for tool use. The initial interaction is via a Command-Line Interface (CLI).
 
 ## Key Components
 - **Core Agent Engine:**
     - *Purpose:* Manages the main operational loop (ReAct), orchestrates calls to LLMs and MCP tools, and maintains conversational context.
     - *Details:* Built on `openai-agents-python`. Includes the `Runner.run()` for the basic loop.
-- **LLM Provider Module:**
-    - *Purpose:* Abstracts interactions with Large Language Models, allowing for configurable selection of different LLM providers (e.g., OpenAI, local models via LiteLLM).
-    - *Details:* Managed via `llm_config.yaml`.
+- **Multi-Model LLM Provider Module:**
+    - *Purpose:* Abstracts interactions with Large Language Models through a dual-layer approach: OpenAI native models via standard client, and third-party models (Google, Anthropic, DeepSeek, etc.) via LiteLLM integration.
+    - *Details:* Automatically detects model type and routes through appropriate client. Supports OpenRouter, direct provider APIs, and local models.
+    - *Technical Stack:* 
+      - OpenAI Agents SDK native support for OpenAI models
+      - LiteLLM for 100+ third-party model providers
+      - Automatic model prefix detection and routing
 - **Prompt Management Module:**
     - *Purpose:* Loads agent instructions and task-specific prompts from external files (e.g., `prompts/` directory).
     - *Details:* Allows behavior customization without code changes.
 - **MCP Configuration & Integration Module:**
-    - *Purpose:* Manages connections to MCP servers (defined in `mcp_agent.config.yaml`) and facilitates tool discovery and invocation by the agent.
+    - *Purpose:* Manages connections to MCP servers (defined in `mcp_servers.yaml`) and facilitates tool discovery and invocation by the agent.
     - *Details:* Leverages `openai-agents-mcp` extension or a custom solution. Supports stdio-based tools initially, with design for future HTTP/SSE tools.
 - **MCP Tool Ecosystem:**
     - *Purpose:* Provides the set of external tools the agent can use to perform actions (e.g., file access, data processing, code analysis).
     - *Details:* Tools are exposed by MCP servers. Configuration allows for metadata and categorization.
-- **Configuration Files (`mcp_agent.config.yaml`, `llm_config.yaml`, `prompts/`):**
-    - *Purpose:* Define and configure MCP servers, LLM providers, and prompts, respectively. Central to the agent's customizability and extensibility.
+- **Hierarchical Configuration System:**
+    - *Purpose:* Manages complex configuration through a 4-tier hierarchy: Environment Variables (.env) > User Configuration (config/) > Profile Configurations (profiles/) > Default Configurations (defaults/)
+    - *Details:* Supports environment variable substitution, profile-based deployment, and resource definition separation.
 - **Command-Line Interface (CLI):**
     - *Purpose:* Provides the initial user interaction point for initiating tasks and receiving outputs.
 - **Workflow Management Module (Future):**
@@ -36,39 +41,87 @@ TinyAgent employs a modular architecture centered around a core agent engine bui
 - **ReAct (Reasoning and Acting):** The core operational paradigm for the agent, enabling it to reason about tasks and take actions.
 - **Strategy Pattern (Implicit):** Different LLMs or prompt sets could be seen as different strategies for task execution, selectable via configuration.
 
-## Data Flow (Example: PRD Generation as described in PRD)
-1.  **Initiation:** User initiates PRD generation via CLI, providing input (e.g., feature list).
-2.  **Analysis & Planning:** TinyAgent (using its configured LLM and PRD generation prompts) analyzes the input and plans steps (e.g., "identify PRD sections," "draft intro").
-3.  **Execution (Action & Tool Use):**
-    - Agent may call an MCP tool (e.g., `file_reader_tool` to get a PRD template, or a `text_formatter_tool`). Tool execution is managed via the MCP Integration Module.
-    - Agent sends requests to the configured LLM (via LLM Provider Module) for content generation based on prompts and context.
-4.  **Observation & Assembly:** Agent receives tool outputs and LLM responses.
-5.  **Content Assembly:** Agent assembles the PRD content.
-6.  **Reflection (Future):** Agent reviews the generated PRD against criteria, potentially refining it.
-7.  **Output:** Agent outputs the final PRD to the user (e.g., prints to console or saves to a file using an MCP tool).
+## Data Flow (Example: Multi-Model LLM Request Processing)
+1. **Initiation:** User initiates request via CLI, providing input (e.g., "generate document using Google Gemini").
+2. **Model Detection & Routing:** TinyAgent analyzes the configured model name:
+   - **Model Prefix Analysis:** Checks for third-party prefixes (`google/`, `anthropic/`, `deepseek/`, etc.)
+   - **Routing Decision:** 
+     - *OpenAI Models:* `gpt-4`, `gpt-3.5-turbo` → Route to OpenAI Client
+     - *Third-Party Models:* `google/gemini-2.0-flash-001` → Route to LiteLLM
+     - *Unknown Models:* Default to OpenAI routing for backward compatibility
+3. **LLM Client Initialization:**
+   - **OpenAI Route:** Create standard OpenAI client with OpenAI Agents SDK
+   - **LiteLLM Route:** Create `LitellmModel` wrapper with provider-specific configuration
+4. **Analysis & Planning:** Agent (using the routed LLM) analyzes input and plans steps.
+5. **Execution (Action & Tool Use):**
+    - Agent may call MCP tools (e.g., `file_reader_tool`, `text_formatter_tool`) via MCP Integration Module
+    - Agent sends requests to the configured LLM via the appropriate client
+    - LiteLLM handles provider-specific API differences transparently
+6. **Observation & Assembly:** Agent receives tool outputs and LLM responses.
+7. **Content Assembly:** Agent assembles the final output.
+8. **Error Handling & Fallback:** 
+   - *Provider Errors:* LiteLLM handles retries and provider-specific error codes
+   - *Model Errors:* Graceful degradation to alternative models if configured
+9. **Output:** Agent outputs result to user via CLI.
 
 ## Key Technical Decisions
 - **Use `openai-agents-python` SDK:** Provides a foundational framework for agent development.
+- **Adopt Multi-Model LLM Strategy via LiteLLM:** 
+  - *Rationale:* Enables support for 100+ LLM providers while maintaining OpenAI Agents SDK compatibility
+  - *Implementation:* Dual-layer approach - native OpenAI client for OpenAI models, LiteLLM for third-party models
+  - *Benefits:* Provider flexibility, cost optimization, model experimentation without architectural changes
+- **Implement Automatic Model Routing:**
+  - *Strategy:* Detect model prefix (e.g., `google/`, `anthropic/`, `deepseek/`) to determine routing strategy
+  - *OpenAI Models:* Use standard OpenAI client with OpenAI Agents SDK
+  - *Third-Party Models:* Route through LiteLLM with `LitellmModel` wrapper
+  - *Fallback:* Standard model names default to OpenAI routing
 - **Adopt MCP for Tooling:** Enables a standardized and extensible way to integrate tools.
+- **Implement Hierarchical Configuration Architecture:**
+  - *Design Principle:* DRY (Don't Repeat Yourself) with resource definition separation
+  - *Priority System:* Environment Variables > User Config > Profiles > Defaults
+  - *Benefits:* Environment-agnostic deployment, secure credential management, easy customization
 - **Externalize Configuration:** LLMs, Prompts, and MCP tools are configured externally for flexibility.
 - **Initial CLI Focus:** Prioritizes core functionality over a GUI for the first version.
 - **Stdio for Initial MCP Tools:** Simplifies local tool integration.
 - **ReAct Loop as Core:** Provides a robust pattern for agent operation.
+- **Environment Variable Integration:** Secure credential management and environment-specific configuration via .env files.
 
 ## Component Relationships
 ```mermaid
 graph TD
     User --> CLI;
     CLI --> CoreAgentEngine;
-    CoreAgentEngine -- Manages --> LLMProviderModule;
-    CoreAgentEngine -- Manages --> PromptManagementModule;
-    CoreAgentEngine -- Manages --> MCPIntegrationModule;
-    LLMProviderModule -- Uses Config --> LLMConfig[llm_config.yaml];
-    LLMProviderModule -- Interacts --> LLMService[LLM Service (e.g., OpenAI API)];
-    PromptManagementModule -- Uses Config --> PromptsDir[prompts/ directory];
-    MCPIntegrationModule -- Uses Config --> MCPConfig[mcp_agent.config.yaml];
-    MCPIntegrationModule -- Interacts --> MCPTools[MCP Tool Servers (Stdio/HTTP)];
-    CoreAgentEngine -- Outputs/Inputs --> User;
+    CoreAgentEngine --> LLMRouter[LLM Router/Detector];
+    LLMRouter --> |OpenAI Models| OpenAIClient[OpenAI Client];
+    LLMRouter --> |Third-Party Models| LiteLLM[LiteLLM Client];
+    OpenAIClient --> OpenAIService[OpenAI API];
+    LiteLLM --> ThirdPartyServices[Google/Anthropic/DeepSeek APIs];
+    CoreAgentEngine --> PromptManagementModule;
+    CoreAgentEngine --> MCPIntegrationModule;
+    
+    %% Configuration Layer
+    ConfigManager[Configuration Manager] --> EnvironmentVars[Environment Variables (.env)];
+    ConfigManager --> UserConfig[User Config (config/)];
+    ConfigManager --> Profiles[Profiles (profiles/)];
+    ConfigManager --> Defaults[Defaults (defaults/)];
+    
+    %% LLM Configuration
+    LLMRouter --> ConfigManager;
+    ConfigManager --> LLMProviders[llm_providers.yaml];
+    
+    %% Other Configuration
+    PromptManagementModule --> PromptsDir[prompts/ directory];
+    MCPIntegrationModule --> MCPConfig[mcp_servers.yaml];
+    MCPIntegrationModule --> MCPTools[MCP Tool Servers (Stdio/HTTP)];
+    
+    %% Output
+    CoreAgentEngine --> User;
+    
+    %% Styling
+    classDef newComponent fill:#e1f5fe;
+    classDef configComponent fill:#f3e5f5;
+    class LLMRouter,LiteLLM newComponent;
+    class ConfigManager,EnvironmentVars,UserConfig,Profiles,Defaults configComponent;
 ```
 
 ## Configuration Architecture Design
@@ -170,24 +223,43 @@ environment:
 #### 4.2 LLM Provider Configuration
 
 ```yaml
-# config/llm.yaml - LLM提供商配置
+# defaults/llm_providers.yaml - LLM提供商配置
 providers:
+  # OpenAI Native Models (使用标准OpenAI Client)
   openai:
     model: "${OPENAI_MODEL:gpt-4}"
     api_key_env: "OPENAI_API_KEY"
     base_url: "${OPENAI_BASE_URL:https://api.openai.com/v1}"
     max_tokens: 2000
     temperature: 0.7
+    client_type: "openai"  # 显式指定使用OpenAI client
 
+  # Third-Party Models via OpenRouter (使用LiteLLM)
   openrouter:
-    model: "${OPENROUTER_MODEL:anthropic/claude-3.5-sonnet}"
+    model: "${OPENROUTER_MODEL:google/gemini-2.0-flash-001}"
     api_key_env: "OPENROUTER_API_KEY" 
     base_url: "https://openrouter.ai/api/v1"
     max_tokens: 2000
     temperature: 0.7
+    client_type: "litellm"  # 显式指定使用LiteLLM
     extra_headers:
       HTTP-Referer: "${OPENROUTER_REFERER:https://github.com/your-org/tinyagent}"
       X-Title: "${OPENROUTER_TITLE:TinyAgent}"
+
+  # Direct Third-Party Provider (使用LiteLLM)
+  anthropic:
+    model: "${ANTHROPIC_MODEL:anthropic/claude-3-5-sonnet}"
+    api_key_env: "ANTHROPIC_API_KEY"
+    max_tokens: 2000
+    temperature: 0.7
+    client_type: "litellm"
+
+  google:
+    model: "${GOOGLE_MODEL:google/gemini-2.0-flash-001}"
+    api_key_env: "GOOGLE_API_KEY"
+    max_tokens: 2000
+    temperature: 0.7
+    client_type: "litellm"
 
   local_llm:
     model: "${LOCAL_MODEL:llama2}"
@@ -195,6 +267,32 @@ providers:
     base_url: "${LOCAL_LLM_URL:http://localhost:11434}"
     max_tokens: 2000
     temperature: 0.7
+    client_type: "litellm"
+
+# 模型路由规则 (自动检测)
+routing_rules:
+  # OpenAI模型前缀 (使用标准client)
+  openai_prefixes:
+    - "gpt-"
+    - "text-davinci-"
+    - "text-curie-"
+    - "text-babbage-"
+    - "text-ada-"
+  
+  # 第三方模型前缀 (使用LiteLLM)
+  litellm_prefixes:
+    - "anthropic/"
+    - "claude-"
+    - "google/"
+    - "gemini-"
+    - "deepseek/"
+    - "mistral/"
+    - "meta/"
+    - "cohere/"
+  
+  # 默认路由策略
+  default_client: "openai"  # 未知模型默认使用OpenAI client
+  fallback_enabled: true    # 启用fallback机制
 
 # 默认设置 (应用于所有提供商)
 defaults:
@@ -447,15 +545,123 @@ class ConfigValidator:
         return ValidationResult(errors=errors, warnings=warnings)
 ```
 
-### 9. Next Steps for Implementation
+### 9. LiteLLM Integration Strategy
 
-1. **Install python-dotenv**: Add to requirements.txt
-2. **Enhance ConfigurationManager**: Implement hierarchical loading
-3. **Create Default Configs**: Move current configs to defaults/
-4. **Add Profile System**: Create development/production profiles  
-5. **Update CLI**: Add --profile and --config-dir options
-6. **Add Validation**: Implement configuration validation
-7. **Migration Guide**: Create guide for migrating existing configs
+#### 9.1 Implementation Architecture
+
+```python
+class LLMClientRouter:
+    """智能LLM客户端路由器"""
+    
+    def __init__(self, config: LLMConfig):
+        self.config = config
+        self.routing_rules = config.routing_rules
+    
+    def detect_client_type(self, model_name: str) -> str:
+        """根据模型名称检测应使用的客户端类型"""
+        # 检查显式配置
+        if hasattr(self.config, 'client_type'):
+            return self.config.client_type
+        
+        # 自动检测基于前缀
+        for prefix in self.routing_rules.litellm_prefixes:
+            if model_name.startswith(prefix):
+                return "litellm"
+        
+        for prefix in self.routing_rules.openai_prefixes:
+            if model_name.startswith(prefix):
+                return "openai"
+        
+        return self.routing_rules.default_client
+    
+    def create_model(self, model_name: str, **kwargs):
+        """创建适当的模型实例"""
+        client_type = self.detect_client_type(model_name)
+        
+        if client_type == "litellm":
+            from agents.extensions.models.litellm_model import LitellmModel
+            return LitellmModel(
+                model=model_name,
+                api_key=kwargs.get('api_key'),
+                base_url=kwargs.get('base_url'),
+                **kwargs
+            )
+        else:
+            # 使用标准OpenAI模型
+            return model_name  # OpenAI Agents SDK处理
+```
+
+#### 9.2 依赖和安装要求
+
+```bash
+# 核心依赖
+pip install "openai-agents[litellm]"
+
+# 确保LiteLLM支持
+pip install litellm>=1.0.0
+
+# 可选：特定提供商SDK
+pip install anthropic  # Anthropic models
+pip install google-generativeai  # Google models
+```
+
+#### 9.3 配置迁移策略
+
+1. **自动检测现有配置**
+2. **基于模型名称推断客户端类型**
+3. **保持向后兼容性**
+4. **渐进式迁移路径**
+
+#### 9.4 错误处理和Fallback
+
+```python
+class LLMClientManager:
+    """LLM客户端管理器，包含错误处理和fallback"""
+    
+    async def create_agent_with_fallback(self, config):
+        """创建Agent，包含fallback机制"""
+        try:
+            # 尝试首选模型
+            return await self._create_agent(config.primary_model)
+        except UnsupportedModelError:
+            # 回退到OpenAI兼容模式
+            logger.warning(f"Falling back to OpenAI-compatible mode for {config.primary_model}")
+            return await self._create_agent_openai_mode(config.fallback_model)
+        except Exception as e:
+            # 最终回退
+            logger.error(f"Model creation failed: {e}")
+            return await self._create_basic_agent()
+```
+
+### 10. 下一步实现计划
+
+#### 阶段1：LiteLLM集成 (当前)
+1. **安装LiteLLM依赖**: ✅ 
+2. **实现模型路由器**: 🔄 进行中
+3. **更新Agent创建逻辑**: 📋 待实现
+4. **测试第三方模型**: 📋 待实现
+
+#### 阶段2：配置增强
+1. **添加模型类型检测**
+2. **实现自动路由规则**
+3. **增强错误处理**
+4. **添加性能监控**
+
+#### 阶段3：生产优化
+1. **模型缓存机制**
+2. **负载均衡支持**
+3. **成本优化策略**
+4. **监控和告警**
+
+### 11. Next Steps for Implementation
+
+1. **Install LiteLLM**: Add `openai-agents[litellm]` to requirements.txt ✅
+2. **Enhance ConfigurationManager**: Implement model routing logic 📋
+3. **Update Agent Creation**: Add LitellmModel support 📋
+4. **Create Model Router**: Implement automatic client detection 📋
+5. **Add Validation**: Implement model compatibility validation 📋
+6. **Migration Guide**: Create guide for migrating to new model support 📋
+7. **Testing**: Comprehensive testing with multiple model providers 📋
 
 This design provides a clean, hierarchical, and flexible configuration system that scales from simple usage to complex enterprise deployments.
 

@@ -1,27 +1,27 @@
-# Production Profile Configuration
-# 生产环境配置 - 只引用资源，不重复定义
+# OpenRouter Profile Configuration
+# OpenRouter专用配置示例
 
 agent:
-  name: "TinyAgent-Prod"
+  name: "TinyAgent-OpenRouter"
   instructions_file: "prompts/default_instructions.txt"
-  max_iterations: 20
+  max_iterations: 15
 
 llm:
   active_provider: "openrouter"  # 引用 defaults/llm_providers.yaml 中的定义
+  # 可以通过环境变量覆盖模型: OPENROUTER_MODEL=anthropic/claude-3-haiku
 
 mcp:
   enabled: true
   auto_discover: true
-  # 生产环境启用所有服务器
+  # 启用基本的MCP服务器
   enabled_servers:
     - "filesystem"
     - "fetch"
-    - "sqlite"
 
 logging:
   level: "INFO"
   format: "structured"
-  file: "${LOG_FILE:/var/log/tinyagent/production.log}"
+  file: "${LOG_FILE:./logs/openrouter.log}"
 
 environment:
   env_file: ".env"

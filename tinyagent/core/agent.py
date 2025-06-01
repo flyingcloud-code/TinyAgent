@@ -11,12 +11,21 @@ from typing import Optional, List, Any, Dict
 from pathlib import Path
 
 try:
-    from agents import Agent, Runner
+    from agents import Agent, Runner, ModelSettings, set_default_openai_client, set_default_openai_api, set_tracing_disabled
     from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+    from agents.extensions.models.litellm_model import LitellmModel
+    from openai import AsyncOpenAI
     AGENTS_AVAILABLE = True
+    LITELLM_AVAILABLE = True
+    
+    # Disable tracing completely using the proper method
+    set_tracing_disabled(True)
+    
 except ImportError as e:
     logging.warning(f"OpenAI Agents SDK not available: {e}")
     AGENTS_AVAILABLE = False
+    LITELLM_AVAILABLE = False
+    LitellmModel = None
 
 from ..core.config import TinyAgentConfig, get_config
 from ..mcp.manager import MCPServerManager
@@ -29,6 +38,7 @@ class TinyAgent:
     
     This class wraps the openai-agents SDK and provides a simplified interface
     for creating agents with MCP (Model Context Protocol) tool support.
+    Supports both OpenAI models and third-party models via LiteLLM.
     """
     
     def __init__(
@@ -87,6 +97,76 @@ class TinyAgent:
         
         self.logger.info(f"TinyAgent initialized with {len(self.mcp_servers)} MCP servers")
     
+    def _should_use_litellm(self, model_name: str) -> bool:
+        """
+        Check if a model should use LiteLLM based on its name/prefix.
+        
+        Args:
+            model_name: Name of the model to check
+            
+        Returns:
+            True if the model should use LiteLLM, False for standard OpenAI client
+        """
+        if not LITELLM_AVAILABLE:
+            return False
+            
+        # Third-party model prefixes that require LiteLLM
+        third_party_prefixes = [
+            'google/', 'anthropic/', 'claude-', 'gemini-',
+            'deepseek/', 'mistral/', 'meta/', 'cohere/',
+            'replicate/', 'together/', 'ai21/', 'bedrock/',
+            'azure/', 'vertex_ai/', 'palm/'
+        ]
+        
+        # Check if model name starts with any third-party prefix
+        return any(model_name.startswith(prefix) for prefix in third_party_prefixes)
+    
+    def _create_model_instance(self, model_name: str) -> Any:
+        """
+        Create appropriate model instance based on model name.
+        
+        Args:
+            model_name: Name of the model
+            
+        Returns:
+            Model instance (LitellmModel for third-party, string for OpenAI)
+        """
+        if self._should_use_litellm(model_name):
+            if not LITELLM_AVAILABLE:
+                raise ImportError(
+                    f"Model '{model_name}' requires LiteLLM support, but LitellmModel is not available. "
+                    "Please install with: pip install 'openai-agents[litellm]'"
+                )
+            
+            # Get API key for this model
+            api_key = os.getenv(self.config.llm.api_key_env)
+            if not api_key:
+                raise ValueError(f"API key not found in environment variable: {self.config.llm.api_key_env}")
+            
+            # For OpenRouter models, ensure proper format
+            formatted_model_name = model_name
+            if self.config.llm.base_url and "openrouter.ai" in self.config.llm.base_url:
+                # If using OpenRouter and model doesn't have openrouter/ prefix, add it
+                if not model_name.startswith("openrouter/"):
+                    formatted_model_name = f"openrouter/{model_name}"
+            
+            # Create LitellmModel instance with only supported parameters
+            litellm_kwargs = {
+                "model": formatted_model_name,
+                "api_key": api_key,
+            }
+            
+            # Add base_url if configured (for OpenRouter, etc.)
+            if self.config.llm.base_url:
+                litellm_kwargs["base_url"] = self.config.llm.base_url
+            
+            self.logger.info(f"Creating LitellmModel for third-party model: {formatted_model_name}")
+            return LitellmModel(**litellm_kwargs)
+        else:
+            # Use standard OpenAI model (string)
+            self.logger.info(f"Using standard OpenAI model: {model_name}")
+            return model_name
+    
     def _load_instructions(self, custom_instructions: Optional[str] = None) -> str:
         """
         Load agent instructions from file or use custom instructions.
@@ -135,32 +215,59 @@ class TinyAgent:
             Configured Agent instance
         """
         try:
-            # Create model configuration
-            model = OpenAIChatCompletionsModel(
-                model=self.model_name,
-                temperature=self.config.llm.temperature,
-                max_tokens=self.config.llm.max_tokens
-            )
+            # Set to use Chat Completions API instead of Responses API
+            set_default_openai_api("chat_completions")
             
-            # Create agent with MCP servers
-            agent = Agent(
-                name=self.config.agent.name,
-                instructions=self.instructions,
-                model=model,
-                mcp_servers=self.mcp_servers
-            )
+            # Get API key from environment
+            api_key = os.getenv(self.config.llm.api_key_env)
+            if not api_key:
+                raise ValueError(f"API key not found in environment variable: {self.config.llm.api_key_env}")
             
-            self.logger.info(f"Created agent '{self.config.agent.name}' with model '{self.model_name}'")
+            # Create appropriate model instance (LitellmModel or string)
+            model_instance = self._create_model_instance(self.model_name)
+            
+            # Set up custom OpenAI client if base_url is configured (for OpenAI models)
+            # Note: For LiteLLM models, base_url is handled by LitellmModel itself
+            if self.config.llm.base_url and not self._should_use_litellm(self.model_name):
+                custom_client = AsyncOpenAI(
+                    api_key=api_key,
+                    base_url=self.config.llm.base_url
+                )
+                set_default_openai_client(custom_client)
+                self.logger.info(f"Using custom OpenAI client with base_url: {self.config.llm.base_url}")
+            
+            # Create model settings with temperature (only for non-LiteLLM models)
+            model_settings = None
+            if not self._should_use_litellm(self.model_name):
+                model_settings = ModelSettings(temperature=self.config.llm.temperature)
+            
+            # Create agent with appropriate model instance and MCP servers
+            agent_kwargs = {
+                "name": self.config.agent.name,
+                "instructions": self.instructions,
+                "model": model_instance,
+                "mcp_servers": self.mcp_servers
+            }
+            
+            # Add model_settings only for non-LiteLLM models
+            if model_settings is not None:
+                agent_kwargs["model_settings"] = model_settings
+            
+            agent = Agent(**agent_kwargs)
+            
+            model_type = "LiteLLM" if self._should_use_litellm(self.model_name) else "OpenAI"
+            self.logger.info(f"Created agent '{self.config.agent.name}' with {model_type} model '{self.model_name}'")
             return agent
             
         except Exception as e:
             self.logger.error(f"Failed to create agent: {e}")
             # Create basic agent without MCP servers as fallback
             try:
+                # Try to create with just model name for fallback (always use string for fallback)
                 agent = Agent(
                     name=self.config.agent.name,
                     instructions=self.instructions,
-                    model=self.model_name
+                    model=self.model_name if not self._should_use_litellm(self.model_name) else "gpt-3.5-turbo"
                 )
                 self.logger.warning("Created fallback agent without MCP servers")
                 return agent

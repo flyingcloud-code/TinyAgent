@@ -185,15 +185,14 @@ class ConfigurationManager:
             return {}
     
     def _load_defaults(self) -> Dict[str, Any]:
-        """Load default configuration files."""
+        """Load default configuration files (resource definitions only)."""
         defaults_dir = self.config_dir / "defaults"
         config = {}
         
-        # Load in specific order
+        # 只加载资源定义文件
         default_files = [
-            "agent.yaml",
-            "llm_providers.yaml", 
-            "mcp_servers.yaml"
+            "llm_providers.yaml",   # LLM提供商资源定义
+            "mcp_servers.yaml"      # MCP服务器资源定义
         ]
         
         for filename in default_files:
@@ -201,7 +200,7 @@ class ConfigurationManager:
             file_config = self._load_yaml_file(file_path)
             config = self._merge_configs(config, file_config)
         
-        logger.debug("Loaded default configurations")
+        logger.debug("Loaded default resource definitions")
         return config
     
     def _load_profile(self, profile_name: str) -> Dict[str, Any]:
@@ -354,25 +353,54 @@ class ConfigurationManager:
             mcp_data = raw_config['mcp']
             servers = {}
             
-            for server_name, server_data in mcp_data.get('servers', {}).items():
-                servers[server_name] = MCPServerConfig(
-                    name=server_name,
-                    type=server_data.get('type', 'stdio'),
-                    command=server_data.get('command', None),
-                    args=server_data.get('args', None),
-                    env=server_data.get('env', None),
-                    cwd=server_data.get('cwd', None),
-                    encoding=server_data.get('encoding', None),
-                    url=server_data.get('url', None),
-                    headers=server_data.get('headers', None),
-                    timeout=server_data.get('timeout', None),
-                    sse_read_timeout=server_data.get('sse_read_timeout', None),
-                    terminate_on_close=server_data.get('terminate_on_close', None),
-                    cache_tools=server_data.get('cache_tools', False),
-                    description=server_data.get('description', ''),
-                    enabled=server_data.get('enabled', True),
-                    category=server_data.get('category', 'utility_operations')
-                )
+            # 处理enabled_servers引用机制
+            if 'enabled_servers' in mcp_data and 'servers' in raw_config:
+                # 从defaults中获取服务器定义，根据enabled_servers筛选
+                available_servers = raw_config['servers']
+                enabled_server_names = mcp_data['enabled_servers']
+                
+                for server_name in enabled_server_names:
+                    if server_name in available_servers:
+                        server_data = available_servers[server_name]
+                        servers[server_name] = MCPServerConfig(
+                            name=server_name,
+                            type=server_data.get('type', 'stdio'),
+                            command=server_data.get('command', None),
+                            args=server_data.get('args', None),
+                            env=server_data.get('env', None),
+                            cwd=server_data.get('cwd', None),
+                            encoding=server_data.get('encoding', None),
+                            url=server_data.get('url', None),
+                            headers=server_data.get('headers', None),
+                            timeout=server_data.get('timeout', None),
+                            sse_read_timeout=server_data.get('sse_read_timeout', None),
+                            terminate_on_close=server_data.get('terminate_on_close', None),
+                            cache_tools=server_data.get('cache_tools', False),
+                            description=server_data.get('description', ''),
+                            enabled=True,  # enabled_servers中的都是启用的
+                            category=server_data.get('category', 'utility_operations')
+                        )
+            elif 'servers' in mcp_data:
+                # 兼容旧的直接定义方式
+                for server_name, server_data in mcp_data.get('servers', {}).items():
+                    servers[server_name] = MCPServerConfig(
+                        name=server_name,
+                        type=server_data.get('type', 'stdio'),
+                        command=server_data.get('command', None),
+                        args=server_data.get('args', None),
+                        env=server_data.get('env', None),
+                        cwd=server_data.get('cwd', None),
+                        encoding=server_data.get('encoding', None),
+                        url=server_data.get('url', None),
+                        headers=server_data.get('headers', None),
+                        timeout=server_data.get('timeout', None),
+                        sse_read_timeout=server_data.get('sse_read_timeout', None),
+                        terminate_on_close=server_data.get('terminate_on_close', None),
+                        cache_tools=server_data.get('cache_tools', False),
+                        description=server_data.get('description', ''),
+                        enabled=server_data.get('enabled', True),
+                        category=server_data.get('category', 'utility_operations')
+                    )
             
             config.mcp = MCPConfig(
                 servers=servers,

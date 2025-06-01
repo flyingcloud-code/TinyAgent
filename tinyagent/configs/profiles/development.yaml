@@ -1,33 +1,23 @@
 # Development Profile Configuration
-# Optimized for development and testing
+# 优化的开发环境配置 - 只引用资源，不重复定义
 
 agent:
   name: "TinyAgent-Dev"
+  instructions_file: "prompts/default_instructions.txt"
   max_iterations: 5
 
-# Let llm use the default active_provider from defaults/agent.yaml
+llm:
+  active_provider: "openrouter"  # 引用 defaults/llm_providers.yaml 中的定义
 
 mcp:
-  enabled: true
-  auto_discover: true
-  servers:
-    filesystem:
-      enabled: true
-      type: "stdio"
-      command: "npx"
-      args: ["-y", "@modelcontextprotocol/server-filesystem", "${TINYAGENT_ROOT:.}"]
-      description: "File system operations (read, write, list directories)"
-      category: "file_operations"
-    fetch:
-      enabled: true
-      type: "stdio"
-      command: "npx"
-      args: ["-y", "@modelcontextprotocol/server-fetch"]
-      description: "HTTP requests and web content fetching"
-      category: "web_operations"
-    sqlite:
-      enabled: false
+  enabled: false  # 暂时禁用MCP以专注于LLM功能
+  auto_discover: false
 
 logging:
   level: "DEBUG"
-  format: "structured" 
+  format: "structured"
+  file: "${LOG_FILE:./logs/development.log}"
+
+environment:
+  env_file: ".env"
+  env_prefix: "TINYAGENT_" 
