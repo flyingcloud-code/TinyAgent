@@ -24,21 +24,29 @@ mcp:
 
     fetch:
       type: "stdio"
-      command: "npx"
-      args: ["-y", "@modelcontextprotocol/server-fetch"]
+      command: "node"
+      args: ["C:\\work\\github\\fetch-mcp\\dist\\index.js"]
       env: {}
       description: "HTTP requests and web content fetching"
-      enabled: false  # 暂时禁用，连接有问题
+      enabled: true  # 启用进行测试
       category: "web_operations"
 
     sqlite:
       type: "stdio"
       command: "npx"
-      args: ["-y", "@modelcontextprotocol/server-sqlite", "./data/tinyagent.db"]
+      args: ["-y", "mcp-sqlite", "./data/tinyagent.db"]
       env: {}
       description: "SQLite database operations"
-      enabled: false  # 暂时禁用，连接有问题
+      enabled: false  # 包在Windows上有安装问题，暂时禁用
       category: "database_operations"
+    
+    my-search:
+      type: "sse"
+      url: "http://localhost:8081/sse"
+      env: {}
+      description: "Search the web via google and get content from web"
+      enabled: false  # 暂时禁用，需要外部服务
+      category: "web_operations"
 
 logging:
   level: "DEBUG"

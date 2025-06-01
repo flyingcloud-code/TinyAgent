@@ -9,6 +9,7 @@ import logging
 import os
 import atexit
 import warnings
+import asyncio
 from typing import Optional, List, Any, Dict
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from pathlib import Path
 warnings.filterwarnings("ignore", message="Unclosed client session")
 warnings.filterwarnings("ignore", message="Unclosed connector")
 warnings.filterwarnings("ignore", category=ResourceWarning, module="aiohttp")
+warnings.filterwarnings("ignore", category=ResourceWarning, message="unclosed transport")
 
 # Configure asyncio logging to suppress connection cleanup errors
 asyncio_logger = logging.getLogger('asyncio')
@@ -24,7 +26,11 @@ class AsyncioConnectionFilter(logging.Filter):
     def filter(self, record):
         if record.levelno == logging.ERROR:
             message = record.getMessage()
-            if "Unclosed client session" in message or "Unclosed connector" in message:
+            if any(phrase in message for phrase in [
+                "Unclosed client session", "Unclosed connector", 
+                "unclosed transport", "Event loop is closed",
+                "I/O operation on closed pipe"
+            ]):
                 return False
         return True
 
@@ -54,31 +60,48 @@ logger = logging.getLogger(__name__)
 
 # Global list to track OpenAI clients for cleanup
 _openai_clients = []
+_active_servers = []
 
 def _cleanup_clients():
-    """Cleanup function to close all OpenAI clients"""
+    """Cleanup function to close all OpenAI clients and MCP servers"""
     import asyncio
     
-    if not _openai_clients:
-        return
-        
     try:
-        # Create new event loop for cleanup
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Try to get current event loop
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("Event loop is closed")
+        except RuntimeError:
+            # Create new event loop for cleanup
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         
         async def _close_all():
+            # Close OpenAI clients
             for client in _openai_clients:
                 try:
                     await client.close()
                 except Exception:
                     pass
+            
+            # Close MCP servers
+            for server in _active_servers:
+                try:
+                    if hasattr(server, 'close'):
+                        await server.close()
+                except Exception:
+                    pass
         
-        loop.run_until_complete(_close_all())
-        loop.close()
+        if not loop.is_closed():
+            loop.run_until_complete(_close_all())
+            
+        # Clear lists
         _openai_clients.clear()
+        _active_servers.clear()
+        
     except Exception:
-        # Ignore cleanup errors
+        # Ignore all cleanup errors
         pass
 
 # Register cleanup function to run at exit
@@ -394,7 +417,6 @@ class TinyAgent:
         
         # 收集所有需要连接的MCP服务器
         server_contexts = []
-        connected_servers = []
         
         try:
             # 为每个MCP服务器创建连接上下文
@@ -402,69 +424,49 @@ class TinyAgent:
                 if not server_config.enabled:
                     continue
                     
-                if server_config.type == "stdio":
-                    server = MCPServerStdio(
-                        name=server_config.name,
-                        params={
-                            "command": server_config.command,
-                            "args": server_config.args or [],
-                            "env": server_config.env or {}
-                        }
-                    )
-                    server_contexts.append(server)
-                elif server_config.type == "sse":
-                    server = MCPServerSse(
-                        name=server_config.name,
-                        params={
-                            "url": server_config.url,
-                            "headers": server_config.headers or {}
-                        }
-                    )
-                    server_contexts.append(server)
-                elif server_config.type == "http":
-                    server = MCPServerStreamableHttp(
-                        name=server_config.name,
-                        params={
-                            "url": server_config.url,
-                            "headers": server_config.headers or {}
-                        }
-                    )
-                    server_contexts.append(server)
+                try:
+                    if server_config.type == "stdio":
+                        server = MCPServerStdio(
+                            name=server_config.name,
+                            params={
+                                "command": server_config.command,
+                                "args": server_config.args or [],
+                                "env": server_config.env or {}
+                            }
+                        )
+                        server_contexts.append(server)
+                        self.logger.debug(f"Created stdio MCP server: {server_config.name}")
+                        
+                    elif server_config.type == "sse":
+                        server = MCPServerSse(
+                            name=server_config.name,
+                            params={
+                                "url": server_config.url,
+                                "headers": server_config.headers or {}
+                            }
+                        )
+                        server_contexts.append(server)
+                        self.logger.debug(f"Created SSE MCP server: {server_config.name}")
+                        
+                    elif server_config.type == "http":
+                        server = MCPServerStreamableHttp(
+                            name=server_config.name,
+                            params={
+                                "url": server_config.url,
+                                "headers": server_config.headers or {}
+                            }
+                        )
+                        server_contexts.append(server)
+                        self.logger.debug(f"Created HTTP MCP server: {server_config.name}")
+                        
+                except Exception as e:
+                    self.logger.warning(f"Failed to create MCP server {server_config.name}: {e}")
+                    continue
             
-            # 连接所有MCP服务器
-            if server_contexts:
-                # 使用嵌套的async with语句连接所有服务器
-                async def connect_servers(servers, index=0):
-                    if index >= len(servers):
-                        # 所有服务器都已连接，创建Agent并运行
-                        agent = Agent(
-                            name=self.config.agent.name,
-                            instructions=self.instructions,
-                            model=self._create_model_instance(self.model_name),
-                            mcp_servers=connected_servers
-                        )
-                        
-                        self.logger.info(f"Running agent with {len(connected_servers)} connected MCP servers")
-                        
-                        result = await Runner.run(
-                            starting_agent=agent,
-                            input=message,
-                            **kwargs
-                        )
-                        
-                        self.logger.info("Agent execution completed successfully")
-                        return result
-                    else:
-                        # 连接下一个服务器
-                        async with servers[index] as server:
-                            connected_servers.append(server)
-                            return await connect_servers(servers, index + 1)
-                
-                return await connect_servers(server_contexts)
-            else:
-                # 没有启用的MCP服务器，直接运行
+            # 如果没有可用的服务器，直接运行
+            if not server_contexts:
+                self.logger.info("No MCP servers available, running without tools")
                 agent = self.get_agent()
-                self.logger.info(f"Running agent with message: {message[:100]}...")
                 
                 result = await Runner.run(
                     starting_agent=agent,
@@ -474,10 +476,97 @@ class TinyAgent:
                 
                 self.logger.info("Agent execution completed successfully")
                 return result
+            
+            # 连接所有MCP服务器并运行Agent
+            return await self._connect_and_run_servers(server_contexts, message, **kwargs)
                 
         except Exception as e:
             self.logger.error(f"Failed to run agent with MCP servers: {e}")
             raise
+    
+    async def _connect_and_run_servers(self, server_contexts: List[Any], message: str, **kwargs) -> Any:
+        """
+        递归连接MCP服务器并运行Agent，确保正确的资源管理。
+        
+        Args:
+            server_contexts: MCP服务器上下文列表
+            message: 输入消息
+            **kwargs: 传递给Runner.run的额外参数
+            
+        Returns:
+            Agent执行结果
+        """
+        connected_servers = []
+        
+        async def connect_servers_recursive(servers, index=0):
+            """递归连接服务器的内部函数"""
+            if index >= len(servers):
+                # 所有服务器都已连接，创建Agent并运行
+                try:
+                    agent = Agent(
+                        name=self.config.agent.name,
+                        instructions=self.instructions,
+                        model=self._create_model_instance(self.model_name),
+                        mcp_servers=connected_servers
+                    )
+                    
+                    self.logger.info(f"Running agent with {len(connected_servers)} connected MCP servers")
+                    
+                    result = await Runner.run(
+                        starting_agent=agent,
+                        input=message,
+                        **kwargs
+                    )
+                    
+                    self.logger.info("Agent execution completed successfully")
+                    return result
+                    
+                except Exception as e:
+                    self.logger.error(f"Failed to run agent: {e}")
+                    raise
+            else:
+                # 连接当前服务器
+                current_server = servers[index]
+                try:
+                    self.logger.debug(f"Connecting to MCP server: {current_server.name}")
+                    
+                    async with current_server as server:
+                        # 添加到活跃服务器列表用于清理
+                        _active_servers.append(server)
+                        connected_servers.append(server)
+                        
+                        self.logger.info(f"Successfully connected to MCP server: {current_server.name}")
+                        
+                        # 递归连接下一个服务器
+                        try:
+                            result = await connect_servers_recursive(servers, index + 1)
+                            return result
+                        finally:
+                            # 清理：从活跃服务器列表中移除
+                            if server in _active_servers:
+                                _active_servers.remove(server)
+                                
+                except Exception as e:
+                    self.logger.error(f"Failed to connect to MCP server {current_server.name}: {e}")
+                    # 连接失败，继续尝试下一个服务器
+                    return await connect_servers_recursive(servers, index + 1)
+        
+        try:
+            return await connect_servers_recursive(server_contexts)
+        except Exception as e:
+            self.logger.error(f"All MCP server connections failed: {e}")
+            # 如果所有服务器都连接失败，直接运行没有MCP工具的Agent
+            self.logger.info("Falling back to running agent without MCP tools")
+            
+            agent = self.get_agent()
+            result = await Runner.run(
+                starting_agent=agent,
+                input=message,
+                **kwargs
+            )
+            
+            self.logger.info("Agent execution completed successfully (fallback mode)")
+            return result
     
     def run_sync(self, message: str, **kwargs) -> Any:
         """
@@ -493,8 +582,22 @@ class TinyAgent:
         try:
             # 如果有MCP服务器，需要使用异步方法
             if self.mcp_servers:
-                import asyncio
-                return asyncio.run(self.run(message, **kwargs))
+                # 创建新的事件循环来运行异步方法
+                try:
+                    # 尝试获取当前事件循环
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # 如果在已运行的事件循环中，创建新的线程来运行
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(self._run_in_new_loop, message, **kwargs)
+                            return future.result()
+                    else:
+                        # 如果事件循环未运行，直接运行
+                        return loop.run_until_complete(self.run(message, **kwargs))
+                except RuntimeError:
+                    # 没有事件循环，创建新的
+                    return asyncio.run(self.run(message, **kwargs))
             else:
                 # 没有MCP服务器，可以直接使用同步方法
                 agent = self.get_agent()
@@ -512,6 +615,19 @@ class TinyAgent:
         except Exception as e:
             self.logger.error(f"Agent execution failed: {e}")
             raise
+    
+    def _run_in_new_loop(self, message: str, **kwargs) -> Any:
+        """
+        在新的事件循环中运行异步方法的辅助函数
+        
+        Args:
+            message: 输入消息
+            **kwargs: 传递给run的额外参数
+            
+        Returns:
+            Agent执行结果
+        """
+        return asyncio.run(self.run(message, **kwargs))
     
     def get_mcp_server_info(self) -> List[Dict[str, Any]]:
         """
