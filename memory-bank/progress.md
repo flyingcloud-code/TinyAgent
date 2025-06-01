@@ -59,30 +59,81 @@
 - ✅ **Environment Variables** - Proper substitution and defaults
 - ✅ **CLI Commands** - All enhanced commands working
 
-**Known Issues:**
-- ⚠️ **MCP Server Connection** - Requires proper async context management (future work)
-- ⚠️ **Tracing Authentication** - Non-fatal OpenAI tracing errors (cosmetic)
+### ✅ Phase 2.5: LiteLLM Multi-Model Integration (100% Complete)
+**Duration**: 2025-06-01
+**Status**: COMPLETED ✅
+
+**Major Breakthrough:**
+TinyAgent现在支持100+第三方LLM模型，包括Google Gemini, Anthropic Claude, DeepSeek, Mistral等，通过自动模型路由实现无缝集成。
+
+**核心成就:**
+- ✅ **LiteLLM集成** - 成功集成`openai-agents[litellm]>=0.0.16`依赖
+- ✅ **自动模型路由** - 基于模型前缀的智能检测和路由系统
+- ✅ **第三方模型支持** - Google Gemini 2.0 Flash测试成功并正常工作
+- ✅ **向后兼容** - OpenAI原生模型继续无缝工作
+- ✅ **配置简化** - 无需修改现有配置，自动检测模型类型
+
+**技术实现:**
+- ✅ **模型前缀检测** - 自动识别`google/`, `anthropic/`, `deepseek/`等前缀
+- ✅ **双层架构** - OpenAI原生客户端 + LiteLLM客户端
+- ✅ **OpenRouter集成** - 自动添加`openrouter/`前缀用于第三方模型
+- ✅ **LitellmModel实例化** - 正确处理API密钥和base_url配置
+- ✅ **错误处理** - 模型不兼容时的优雅降级
+
+**支持的模型前缀:**
+- `google/` - Google models (Gemini)
+- `anthropic/` - Anthropic models (Claude)  
+- `deepseek/` - DeepSeek models
+- `mistral/` - Mistral models
+- `meta/` - Meta models (Llama)
+- `cohere/` - Cohere models
+- `replicate/` - Replicate models
+- `azure/` - Azure models
+- `vertex_ai/` - Vertex AI models
+
+**测试验证:**
+```bash
+# 成功测试案例 - Google Gemini 2.0 Flash
+python -m tinyagent.cli.main run "Hello! Can you introduce yourself?"
+
+# 日志确认正确路由
+LiteLLM completion() model= google/gemini-2.0-flash-001; provider = openrouter
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+```
+
+**用户体验改进:**
+- ✅ **零配置切换** - 仅需更改模型名称即可切换提供商
+- ✅ **成本优化** - 轻松切换到成本更低的模型
+- ✅ **性能对比** - 可以测试不同模型的表现
+- ✅ **供应商多样性** - 减少对单一供应商的依赖
 
 ## Current Status
 
-### 🎯 Overall Project Completion: ~75%
+### 🎯 Overall Project Completion: ~85%
 
 **What's Working Well:**
 1. **Core Agent Framework** - Fully functional with ReAct loop
-2. **MCP Integration** - Native openai-agents SDK support with multiple transport types
-3. **Configuration System** - Production-ready hierarchical configuration
-4. **LLM Provider Support** - OpenRouter (default), OpenAI, Azure, Local LLM
-5. **CLI Interface** - Comprehensive command set with profile support
-6. **Package Installation** - Clean installation with `uv pip install -e .`
-7. **Testing** - Robust test suite covering all major components
-8. **Documentation** - User-friendly configuration guide
+2. **Multi-Model LLM Support** - 100+ models via OpenAI + LiteLLM integration ✨ **NEW**
+3. **MCP Integration** - Native openai-agents SDK support with multiple transport types
+4. **Configuration System** - Production-ready hierarchical configuration
+5. **LLM Provider Support** - OpenRouter (default), OpenAI, Azure, Google, Anthropic, DeepSeek ✨ **EXPANDED**
+6. **CLI Interface** - Comprehensive command set with profile support
+7. **Package Installation** - Clean installation with `uv pip install -e .`
+8. **Testing** - Robust test suite covering all major components
+9. **Documentation** - User-friendly configuration guide
 
 **Ready for Use:**
 - ✅ Basic agent operations (run, status, interactive)
 - ✅ MCP server management (list-servers, test-mcp)
 - ✅ Document generation (generate prd, design, analysis)
 - ✅ Multi-environment deployment (dev/prod profiles)
-- ✅ Multiple LLM providers with easy switching
+- ✅ **100+ LLM models** including Google Gemini, Claude, DeepSeek ✨ **NEW**
+- ✅ **Automatic model routing** - Zero-configuration model switching ✨ **NEW**
+
+**Known Issues:**
+- ⚠️ **MCP Server Connection** - Requires proper async context management (future work)
+- ⚠️ **Tracing Authentication** - Non-fatal OpenAI tracing errors (cosmetic)
+- 🔧 **aiohttp Connection Warning** - Unclosed client session (needs cleanup, non-functional)
 
 ### 🚧 Phase 3: Advanced Features (Next Phase)
 

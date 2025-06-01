@@ -33,6 +33,114 @@ Python 3.11.11
 ## Context 7 MCP usage
 - for open agent sdk, search: "OpenAI Agents Python"
 - for offical openai python module, search: OpenAI Python
+- for litellm python module, search: litellm
+
+## LiteLLM Multi-Model Support Configuration
+### Overview
+TinyAgent now supports 100+ LLM models via LiteLLM integration with automatic model routing:
+- **OpenAI Models**: gpt-4, gpt-3.5-turbo → Standard OpenAI client
+- **Third-Party Models**: google/, anthropic/, deepseek/ → LiteLLM client
+- **Automatic Detection**: Based on model name prefix
+
+### Installation
+```bash
+# Install OpenAI Agents SDK with LiteLLM support
+uv pip install "openai-agents[litellm]>=0.0.16"
+```
+
+### Supported Model Prefixes (Auto-routed to LiteLLM)
+- `google/` - Google models (Gemini)
+- `anthropic/` - Anthropic models (Claude)
+- `deepseek/` - DeepSeek models
+- `mistral/` - Mistral models
+- `meta/` - Meta models (Llama)
+- `cohere/` - Cohere models
+- `replicate/` - Replicate models
+- `azure/` - Azure models
+- `vertex_ai/` - Vertex AI models
+
+### Configuration Examples
+```yaml
+# In tinyagent/configs/defaults/llm_providers.yaml
+providers:
+  openrouter:
+    model: "google/gemini-2.0-flash-001"  # Auto-detected as LiteLLM
+    api_key_env: "OPENROUTER_API_KEY"
+    base_url: "https://openrouter.ai/api/v1"
+    temperature: 0.7
+  
+  openai:
+    model: "gpt-4"  # Auto-detected as OpenAI native
+    api_key_env: "OPENAI_API_KEY"
+    temperature: 0.7
+```
+
+### Model Routing Logic
+```python
+# Automatic model detection in TinyAgent
+def _should_use_litellm(model_name: str) -> bool:
+    third_party_prefixes = [
+        'google/', 'anthropic/', 'deepseek/', 'mistral/', 
+        'meta/', 'cohere/', 'replicate/', 'azure/', 'vertex_ai/'
+    ]
+    return any(model_name.startswith(prefix) for prefix in third_party_prefixes)
+
+# Model instance creation
+if _should_use_litellm(model_name):
+    # Create LitellmModel for third-party models
+    model = LitellmModel(model=model_name, api_key=api_key, base_url=base_url)
+else:
+    # Use string for OpenAI native models
+    model = model_name
+```
+
+### Usage Examples
+```bash
+# Test Google Gemini via OpenRouter
+python -m tinyagent.cli.main run "Hello from Google Gemini!"
+
+# Test different models by changing configuration
+# Model will be auto-routed based on prefix
+```
+
+## default llm provider in .env file
+- should use <<openrouter>>
+- default model of openrouter should be: <<google/gemini-2.0-flash-001>> (LiteLLM auto-routing)
+- Alternative: <<deepseek/deepseek-chat-v3-0324>> (also LiteLLM auto-routing)
+- <<NOTE>> Third-party models automatically use LiteLLM via model prefix detection
+
+### example to use openrouter APIs with openai sdk
+```
+from openai import OpenAI
+
+client = OpenAI(
+  base_url="https://openrouter.ai/api/v1",
+  api_key="<OPENROUTER_API_KEY>",
+)
+
+completion = client.chat.completions.create(
+  extra_headers={
+    "HTTP-Referer": "<YOUR_SITE_URL>", # Optional. Site URL for rankings on openrouter.ai.
+    "X-Title": "<YOUR_SITE_NAME>", # Optional. Site title for rankings on openrouter.ai.
+  },
+  extra_body={},
+  model="google/gemini-2.0-flash-001",  # Will auto-route to LiteLLM
+  messages=[
+    {
+      "role": "user",
+      "content": "What is the meaning of life?"
+    }
+  ]
+)
+print(completion.choices[0].message.content)
+```
+
+### LiteLLM Integration Benefits
+- ✅ **100+ Models**: Support for Google, Anthropic, DeepSeek, Mistral, etc.
+- ✅ **Automatic Routing**: No configuration changes needed
+- ✅ **Unified Interface**: Same API for all models
+- ✅ **Cost Optimization**: Easy model switching for cost/performance
+- ✅ **Backward Compatible**: Existing OpenAI models continue to work
 
 ## TinyAgent Configuration System (Updated 2025-06-01)
 ### New Hierarchical Configuration Architecture

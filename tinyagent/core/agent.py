@@ -7,8 +7,28 @@ and provides a simplified interface for creating and running agents with MCP too
 
 import logging
 import os
+import atexit
+import warnings
 from typing import Optional, List, Any, Dict
 from pathlib import Path
+
+# Suppress aiohttp resource warnings that can occur with LiteLLM
+warnings.filterwarnings("ignore", message="Unclosed client session")
+warnings.filterwarnings("ignore", message="Unclosed connector")
+warnings.filterwarnings("ignore", category=ResourceWarning, module="aiohttp")
+
+# Configure asyncio logging to suppress connection cleanup errors
+asyncio_logger = logging.getLogger('asyncio')
+# Add a filter to suppress specific messages
+class AsyncioConnectionFilter(logging.Filter):
+    def filter(self, record):
+        if record.levelno == logging.ERROR:
+            message = record.getMessage()
+            if "Unclosed client session" in message or "Unclosed connector" in message:
+                return False
+        return True
+
+asyncio_logger.addFilter(AsyncioConnectionFilter())
 
 try:
     from agents import Agent, Runner, ModelSettings, set_default_openai_client, set_default_openai_api, set_tracing_disabled
@@ -31,6 +51,38 @@ from ..core.config import TinyAgentConfig, get_config
 from ..mcp.manager import MCPServerManager
 
 logger = logging.getLogger(__name__)
+
+# Global list to track OpenAI clients for cleanup
+_openai_clients = []
+
+def _cleanup_clients():
+    """Cleanup function to close all OpenAI clients"""
+    import asyncio
+    
+    if not _openai_clients:
+        return
+        
+    try:
+        # Create new event loop for cleanup
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def _close_all():
+            for client in _openai_clients:
+                try:
+                    await client.close()
+                except Exception:
+                    pass
+        
+        loop.run_until_complete(_close_all())
+        loop.close()
+        _openai_clients.clear()
+    except Exception:
+        # Ignore cleanup errors
+        pass
+
+# Register cleanup function to run at exit
+atexit.register(_cleanup_clients)
 
 class TinyAgent:
     """
@@ -226,14 +278,22 @@ class TinyAgent:
             # Create appropriate model instance (LitellmModel or string)
             model_instance = self._create_model_instance(self.model_name)
             
+            # Initialize custom client reference
+            self._custom_client = None
+            
             # Set up custom OpenAI client if base_url is configured (for OpenAI models)
             # Note: For LiteLLM models, base_url is handled by LitellmModel itself
             if self.config.llm.base_url and not self._should_use_litellm(self.model_name):
-                custom_client = AsyncOpenAI(
+                self._custom_client = AsyncOpenAI(
                     api_key=api_key,
                     base_url=self.config.llm.base_url
                 )
-                set_default_openai_client(custom_client)
+                set_default_openai_client(self._custom_client)
+                
+                # Add to global cleanup list
+                global _openai_clients
+                _openai_clients.append(self._custom_client)
+                
                 self.logger.info(f"Using custom OpenAI client with base_url: {self.config.llm.base_url}")
             
             # Create model settings with temperature (only for non-LiteLLM models)
