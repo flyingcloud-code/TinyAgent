@@ -85,10 +85,17 @@ class MCPConfig:
 
 @dataclass
 class LoggingConfig:
-    """Logging configuration."""
+    """Enhanced logging configuration."""
     level: str = "INFO"
-    format: str = "structured"
+    console_level: str = "USER"      # Console-specific level
+    file_level: str = "DEBUG"        # File-specific level
+    format: str = "user_friendly"    # Format type: user_friendly, technical, structured
     file: Optional[str] = None
+    structured_file: Optional[str] = None  # JSON metrics file
+    max_file_size: str = "10MB"      # Max file size before rotation
+    backup_count: int = 5            # Number of backup files
+    enable_colors: bool = True       # Console colors
+    show_timestamps: bool = False    # Show timestamps in console
 
 
 @dataclass
@@ -415,8 +422,15 @@ class ConfigurationManager:
             logging_data = raw_config['logging']
             config.logging = LoggingConfig(
                 level=logging_data.get('level', config.logging.level),
+                console_level=logging_data.get('console_level', config.logging.console_level),
+                file_level=logging_data.get('file_level', config.logging.file_level),
                 format=logging_data.get('format', config.logging.format),
-                file=logging_data.get('file', config.logging.file)
+                file=logging_data.get('file', config.logging.file),
+                structured_file=logging_data.get('structured_file', config.logging.structured_file),
+                max_file_size=logging_data.get('max_file_size', config.logging.max_file_size),
+                backup_count=logging_data.get('backup_count', config.logging.backup_count),
+                enable_colors=logging_data.get('enable_colors', config.logging.enable_colors),
+                show_timestamps=logging_data.get('show_timestamps', config.logging.show_timestamps)
             )
         
         # Parse environment configuration

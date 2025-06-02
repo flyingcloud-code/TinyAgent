@@ -13,18 +13,25 @@ llm:
 mcp:
   enabled: true
   auto_discover: true
-  # 开发环境启用的服务器
+  # 开发环境启用的服务器 - 只启用最稳定的服务器进行测试
   enabled_servers:
     - "filesystem"
-    - "fetch"
     - "sequential-thinking"
+    # - "fetch"  # 暂时禁用，连接有问题
     # - "time"
     # - "my-search"
 
 logging:
   level: "INFO"
-  format: "structured"
-  file: "${LOG_FILE:./logs/development.log}"
+  console_level: "USER"      # Show only user-relevant info in console
+  file_level: "DEBUG"        # Full technical details in file
+  format: "user_friendly"    # Clean console format
+  file: "logs/development.log"
+  structured_file: "logs/metrics/dev-metrics.jsonl"  # JSON metrics
+  max_file_size: "10MB"
+  backup_count: 5
+  enable_colors: true
+  show_timestamps: false     # No timestamps in console for cleaner UX
 
 environment:
   env_file: ".env"

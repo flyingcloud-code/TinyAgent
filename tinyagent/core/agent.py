@@ -60,24 +60,14 @@ except ImportError as e:
 
 from ..core.config import TinyAgentConfig, get_config
 from ..mcp.manager import MCPServerManager
-
-logger = logging.getLogger(__name__)
-
-# Create specialized logger for MCP tool calls - with better duplicate prevention
-mcp_tool_logger = logging.getLogger('tinyagent.mcp.tools')
-mcp_tool_logger.setLevel(logging.INFO)  # Restore normal INFO level
-
-# Clear any existing handlers to prevent duplicates
-mcp_tool_logger.handlers.clear()
-
-# Add a single handler
-handler = logging.StreamHandler()
-formatter = logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+from ..core.logging import (
+    get_logger, log_user, log_agent, log_tool, log_technical, 
+    MCPToolMetrics, USER_LEVEL, AGENT_LEVEL, TOOL_LEVEL
 )
-handler.setFormatter(formatter)
-mcp_tool_logger.addHandler(handler)
-mcp_tool_logger.propagate = False  # Prevent propagation to root logger
+
+# Get the enhanced logger
+enhanced_logger = get_logger()
+logger = logging.getLogger(__name__)
 
 # Global list to track OpenAI clients for cleanup
 _openai_clients = []
@@ -137,23 +127,26 @@ def _cleanup_clients():
 atexit.register(_cleanup_clients)
 
 def log_tool_call_stats():
-    """Log summary statistics of MCP tool calls"""
+    """Log summary statistics of MCP tool calls using enhanced logging"""
     if _tool_call_stats['total_calls'] > 0:
         avg_duration = _tool_call_stats['total_duration'] / _tool_call_stats['total_calls']
         success_rate = (_tool_call_stats['successful_calls'] / _tool_call_stats['total_calls']) * 100
         
-        mcp_tool_logger.info("=== MCP Tool Call Summary ===")
-        mcp_tool_logger.info(f"Total tool calls: {_tool_call_stats['total_calls']}")
-        mcp_tool_logger.info(f"Successful calls: {_tool_call_stats['successful_calls']}")
-        mcp_tool_logger.info(f"Failed calls: {_tool_call_stats['failed_calls']}")
-        mcp_tool_logger.info(f"Success rate: {success_rate:.1f}%")
-        mcp_tool_logger.info(f"Average call duration: {avg_duration:.2f}s")
-        mcp_tool_logger.info(f"Total tool execution time: {_tool_call_stats['total_duration']:.2f}s")
-        mcp_tool_logger.info("=== End Summary ===")
+        # User-friendly summary
+        log_tool(f"Tool calls completed: {_tool_call_stats['total_calls']} "
+                f"({success_rate:.1f}% success rate)")
+        
+        # Technical details to file
+        log_technical("info", f"=== MCP Tool Call Summary ===")
+        log_technical("info", f"Total tool calls: {_tool_call_stats['total_calls']}")
+        log_technical("info", f"Successful calls: {_tool_call_stats['successful_calls']}")
+        log_technical("info", f"Failed calls: {_tool_call_stats['failed_calls']}")
+        log_technical("info", f"Success rate: {success_rate:.1f}%")
+        log_technical("info", f"Average call duration: {avg_duration:.2f}s")
+        log_technical("info", f"Total tool execution time: {_tool_call_stats['total_duration']:.2f}s")
+        log_technical("info", f"=== End Summary ===")
     else:
-        mcp_tool_logger.info("=== MCP Tool Call Summary ===")
-        mcp_tool_logger.info("No MCP tool calls were made during this run")
-        mcp_tool_logger.info("=== End Summary ===")
+        log_technical("info", "No MCP tool calls were made during this run")
 
 # Add a simple result wrapper class after the imports
 class SimpleResult:
@@ -162,7 +155,7 @@ class SimpleResult:
         self.final_output = output
 
 class MCPToolCallLogger:
-    """Custom wrapper to log MCP tool calls and their input/output"""
+    """Custom wrapper to log MCP tool calls using enhanced logging"""
     
     def __init__(self, original_agent, server_name_map=None, use_streaming=True):
         self.original_agent = original_agent
@@ -175,8 +168,9 @@ class MCPToolCallLogger:
         return getattr(self.original_agent, name)
     
     async def run(self, input_data, **kwargs):
-        """Override run method to log tool calls"""
-        mcp_tool_logger.info(f"🚀 Starting agent run with input: {str(input_data)[:200]}...")
+        """Override run method to log tool calls with enhanced logging"""
+        log_agent("Starting task execution...")
+        log_technical("info", f"Agent run started with input: {str(input_data)[:200]}...")
         start_time = time.time()
         
         try:
@@ -192,7 +186,8 @@ class MCPToolCallLogger:
                 )
             
             duration = time.time() - start_time
-            mcp_tool_logger.info(f"✅ Agent run completed successfully in {duration:.2f}s")
+            log_agent(f"Task completed successfully in {duration:.1f}s")
+            log_technical("info", f"Agent run completed in {duration:.2f}s")
             
             # Log final statistics
             log_tool_call_stats()
@@ -201,7 +196,8 @@ class MCPToolCallLogger:
             
         except Exception as e:
             duration = time.time() - start_time
-            mcp_tool_logger.error(f"❌ Agent run failed after {duration:.2f}s: {e}")
+            log_user(f"❌ Task failed: {str(e)}")
+            log_technical("error", f"Agent run failed after {duration:.2f}s: {e}")
             
             # Log final statistics even on failure
             log_tool_call_stats()
@@ -209,7 +205,7 @@ class MCPToolCallLogger:
             raise
     
     async def _run_with_tool_logging(self, input_data, **kwargs):
-        """Run the agent with tool call interception"""
+        """Run the agent with tool call interception using enhanced logging"""
         # We'll use the streaming API to capture tool calls
         result = Runner.run_streamed(
             starting_agent=self.original_agent,
@@ -219,6 +215,7 @@ class MCPToolCallLogger:
         
         tool_call_sequence = 0
         current_tool_call_start = None
+        collected_responses = []  # Collect all agent responses
         
         async for event in result.stream_events():
             # Ignore raw response events
@@ -230,16 +227,16 @@ class MCPToolCallLogger:
                     tool_call_sequence += 1
                     current_tool_call_start = time.time()
                     
-                    mcp_tool_logger.info(f"🔧 [{tool_call_sequence}] MCP Tool Call Started")
+                    log_tool(f"Starting tool call #{tool_call_sequence}")
                     
-                    # Log basic item info (safe access)
+                    # Log technical details to file
                     try:
                         item_str = str(event.item)
                         if len(item_str) > 200:
                             item_str = item_str[:200] + "..."
-                        mcp_tool_logger.info(f"    Tool Call Item: {item_str}")
+                        log_technical("debug", f"Tool Call Item [{tool_call_sequence}]: {item_str}")
                     except Exception:
-                        mcp_tool_logger.info(f"    Tool Call Item: [Unable to display]")
+                        log_technical("debug", f"Tool Call Item [{tool_call_sequence}]: [Unable to display]")
                     
                     # Update global stats
                     _tool_call_stats['total_calls'] += 1
@@ -253,9 +250,11 @@ class MCPToolCallLogger:
                     
                     # Extract output safely
                     output_content = "N/A"
+                    output_size = 0
                     try:
                         if hasattr(event.item, 'output'):
                             output_content = str(event.item.output)
+                            output_size = len(output_content)
                             if len(output_content) > 500:
                                 output_content = output_content[:500] + "... (truncated)"
                     except Exception:
@@ -269,12 +268,24 @@ class MCPToolCallLogger:
                     except Exception:
                         pass
                     
-                    # Log tool call completion
-                    status_emoji = "✅" if is_success else "❌"
-                    mcp_tool_logger.info(f"{status_emoji} [{tool_call_sequence}] MCP Tool Call Completed:")
-                    mcp_tool_logger.info(f"    Duration: {duration:.2f}s")
-                    mcp_tool_logger.info(f"    Success: {is_success}")
-                    mcp_tool_logger.info(f"    Output: {output_content}")
+                    # Log tool call completion with enhanced logging
+                    status = "[OK]" if is_success else "[FAIL]"
+                    log_tool(f"Tool call #{tool_call_sequence} completed {status} ({duration:.2f}s)")
+                    
+                    # Log technical details to file
+                    log_technical("info", f"Tool Call [{tool_call_sequence}] Completed:")
+                    log_technical("info", f"    Duration: {duration:.2f}s")
+                    log_technical("info", f"    Success: {is_success}")
+                    log_technical("info", f"    Output: {output_content}")
+                    
+                    # Log structured metrics
+                    MCPToolMetrics.log_tool_call(
+                        server_name="unknown",  # We'll need to enhance this
+                        tool_name="unknown",    # We'll need to enhance this
+                        duration=duration,
+                        success=is_success,
+                        output_size=output_size
+                    )
                     
                     # Update global stats
                     if is_success:
@@ -285,26 +296,49 @@ class MCPToolCallLogger:
                     _tool_call_stats['total_duration'] += duration
                     
                 elif event.item.type == "message_output_item":
-                    # Message output - log for context
+                    # Message output - collect for final result
                     try:
                         from agents import ItemHelpers
                         message_text = ItemHelpers.text_message_output(event.item)
                         if message_text and len(message_text.strip()) > 0:
+                            # Collect the full response for returning to user
+                            collected_responses.append(message_text)
+                            
+                            # Log abbreviated version for context
                             if len(message_text) > 300:
-                                message_text = message_text[:300] + "..."
-                            mcp_tool_logger.info(f"💬 Agent Response: {message_text}")
+                                abbreviated = message_text[:300] + "..."
+                                log_agent(f"Agent reasoning: {abbreviated}")
+                            else:
+                                log_agent(f"Agent reasoning: {message_text}")
+                                
+                            log_technical("debug", f"Full agent response: {message_text}")
                     except Exception:
-                        mcp_tool_logger.info(f"💬 Agent generated a response")
+                        log_technical("debug", "Agent generated a response")
                         
-        # Return the final result
+        # Try to get the final result from the stream
         try:
             final_result = await result.result()
             return final_result
         except AttributeError:
-            # Handle API compatibility issue - RunResultStreaming might not have result() method
-            # In this case, we'll return a compatible result wrapper
-            mcp_tool_logger.warning("Unable to get final result from streaming API, returning success indicator")
-            return SimpleResult("MCP tool calls completed successfully")
+            # If streaming API doesn't have result() method, use collected responses
+            if collected_responses:
+                # Combine all collected responses
+                full_response = "\n\n".join(collected_responses)
+                log_technical("info", "Using collected responses as final result")
+                return SimpleResult(full_response)
+            else:
+                log_technical("warning", "No responses collected from streaming API")
+                return SimpleResult("Task completed successfully with MCP tools")
+        except Exception as e:
+            # Handle any other issues with result extraction
+            if collected_responses:
+                # Use collected responses as fallback
+                full_response = "\n\n".join(collected_responses)
+                log_technical("warning", f"Error extracting final result: {e}, using collected responses")
+                return SimpleResult(full_response)
+            else:
+                log_technical("warning", f"Error extracting final result: {e}, returning success indicator")
+                return SimpleResult("Task completed successfully with MCP tools")
 
 class TinyAgent:
     """
@@ -382,7 +416,8 @@ class TinyAgent:
             'total_duration': 0.0
         }
         
-        self.logger.info(f"TinyAgent initialized with {len(self.mcp_servers)} MCP servers (streaming: {self.use_streaming})")
+        log_technical("info", f"TinyAgent initialized with {len(self.mcp_servers)} MCP servers (streaming: {self.use_streaming})")
+        log_agent("Agent ready for tasks")
     
     def _should_use_litellm(self, model_name: str) -> bool:
         """
@@ -447,11 +482,11 @@ class TinyAgent:
             if self.config.llm.base_url:
                 litellm_kwargs["base_url"] = self.config.llm.base_url
             
-            self.logger.info(f"Creating LitellmModel for third-party model: {formatted_model_name}")
+            log_technical("info", f"Creating LitellmModel for third-party model: {formatted_model_name}")
             return LitellmModel(**litellm_kwargs)
         else:
             # Use standard OpenAI model (string)
-            self.logger.info(f"Using standard OpenAI model: {model_name}")
+            log_technical("info", f"Using standard OpenAI model: {model_name}")
             return model_name
     
     def _load_instructions(self, custom_instructions: Optional[str] = None) -> str:
@@ -481,7 +516,7 @@ class TinyAgent:
                 try:
                     return instructions_path.read_text(encoding='utf-8')
                 except Exception as e:
-                    self.logger.warning(f"Failed to load instructions from {instructions_path}: {e}")
+                    log_technical("warning", f"Failed to load instructions from {instructions_path}: {e}")
         
         # Fallback to default instructions
         default_instructions_path = Path(__file__).parent.parent / "prompts" / "default_instructions.txt"
@@ -489,7 +524,7 @@ class TinyAgent:
             try:
                 return default_instructions_path.read_text(encoding='utf-8')
             except Exception as e:
-                self.logger.warning(f"Failed to load default instructions: {e}")
+                log_technical("warning", f"Failed to load default instructions: {e}")
         
         # Ultimate fallback
         return "You are TinyAgent, an intelligent assistant that can help with various tasks using available tools."
@@ -678,13 +713,16 @@ class TinyAgent:
         
         try:
             if server_config.type == "stdio":
+                # For stdio servers, increase timeout for npx package downloads
+                stdio_params = {
+                    "command": server_config.command,
+                    "args": server_config.args or [],
+                    "env": server_config.env or {}
+                }
+                
                 return MCPServerStdio(
                     name=server_config.name,
-                    params={
-                        "command": server_config.command,
-                        "args": server_config.args or [],
-                        "env": server_config.env or {}
-                    }
+                    params=stdio_params
                 )
                 
             elif server_config.type == "sse":
@@ -698,12 +736,12 @@ class TinyAgent:
                 if server_config.timeout is not None:
                     sse_params["timeout"] = server_config.timeout
                 else:
-                    sse_params["timeout"] = 30  # 默认30秒超时
+                    sse_params["timeout"] = 60  # 增加到60秒超时
                     
                 if server_config.sse_read_timeout is not None:
                     sse_params["sse_read_timeout"] = server_config.sse_read_timeout
                 else:
-                    sse_params["sse_read_timeout"] = 60  # 默认60秒SSE读取超时
+                    sse_params["sse_read_timeout"] = 120  # 增加到120秒SSE读取超时
                 
                 return MCPServerSse(
                     name=server_config.name,
@@ -711,18 +749,26 @@ class TinyAgent:
                 )
                 
             elif server_config.type == "http":
+                # 增加HTTP超时
+                http_params = {
+                    "url": server_config.url,
+                    "headers": server_config.headers or {}
+                }
+                
+                if server_config.timeout is not None:
+                    http_params["timeout"] = server_config.timeout
+                else:
+                    http_params["timeout"] = 60  # 增加到60秒超时
+                
                 return MCPServerStreamableHttp(
                     name=server_config.name,
-                    params={
-                        "url": server_config.url,
-                        "headers": server_config.headers or {}
-                    }
+                    params=http_params
                 )
             else:
                 raise ValueError(f"Unknown server type: {server_config.type}")
                 
         except Exception as e:
-            self.logger.error(f"Failed to create MCP server {server_config.name}: {e}")
+            log_technical("error", f"Failed to create MCP server {server_config.name}: {e}")
             return None
     
     async def _run_with_connected_servers(self, server_instances, message: str, **kwargs):
@@ -737,44 +783,69 @@ class TinyAgent:
         Returns:
             Agent执行结果
         """
-        async def connect_and_run():
-            connected_servers = []
-            
-            # 尝试连接所有服务器
-            for server_instance in server_instances:
-                try:
-                    # 这里我们不使用async with，而是手动管理连接
-                    # 因为我们需要将连接的服务器传递给Agent
-                    await server_instance.connect()
-                    connected_servers.append(server_instance)
-                    server_name = getattr(server_instance, 'name', 'unknown')
-                    self.logger.info(f"Successfully connected to MCP server: {server_name}")
-                    
-                    # 添加到全局清理列表
-                    _active_servers.append(server_instance)
-                    
-                except Exception as e:
-                    server_name = getattr(server_instance, 'name', 'unknown')
-                    self.logger.error(f"Failed to connect to MCP server {server_name}: {e}")
-                    continue
-            
-            if not connected_servers:
-                self.logger.warning("No MCP servers connected, falling back to running agent without tools")
-                agent = self.get_agent()
+        import asyncio
+        connected_servers = []
+        
+        # 尝试连接所有服务器
+        for server_instance in server_instances:
+            try:
+                server_name = getattr(server_instance, 'name', 'unknown')
+                log_agent(f"Connecting to MCP server: {server_name}")
+                log_technical("info", f"Attempting to connect to MCP server: {server_name}")
                 
+                # 对于所有MCP服务器，使用统一的长超时时间（因为npx可能需要下载包）
+                log_technical("info", f"Using 120s timeout for MCP server connection: {server_name}")
+                await asyncio.wait_for(server_instance.connect(), timeout=120.0)
+                
+                connected_servers.append(server_instance)
+                log_agent(f"Connected to {server_name}")
+                log_technical("info", f"Successfully connected to MCP server: {server_name}")
+                
+                # 添加到全局清理列表
+                _active_servers.append(server_instance)
+                
+            except asyncio.TimeoutError:
+                server_name = getattr(server_instance, 'name', 'unknown')
+                log_agent(f"Connection timeout for {server_name}")
+                log_technical("warning", f"MCP server {server_name} connection timed out (possibly downloading packages)")
+                continue
+            except Exception as e:
+                server_name = getattr(server_instance, 'name', 'unknown')
+                log_agent(f"Connection failed for {server_name}: {str(e)}")
+                log_technical("error", f"Failed to connect to MCP server {server_name}: {e}")
+                continue
+        
+        try:
+            if not connected_servers:
+                # 没有成功连接的服务器，回退到无工具模式
+                log_agent("No MCP servers available, running without tools")
+                log_technical("warning", "All MCP server connections failed, falling back to no-tools mode")
+                
+                # 创建无MCP服务器的Agent
+                agent = Agent(
+                    name=self.config.agent.name,
+                    instructions=self.instructions,
+                    model=self._create_model_instance(self.model_name)
+                    # 注意：不传递 mcp_servers 参数
+                )
+                
+                # 直接运行，不使用工具调用日志记录
                 result = await Runner.run(
                     starting_agent=agent,
                     input=message,
                     **kwargs
                 )
                 
-                self.logger.info("Agent execution completed successfully (fallback mode)")
+                log_agent("Task completed successfully (no-tools mode)")
                 return result
-            
-            try:
-                # 创建Agent并运行
-                self.logger.info(f"Creating agent with {len(connected_servers)} connected MCP servers")
+            else:
+                # 有成功连接的服务器，正常创建Agent
+                log_tool(f"Starting MCP-enabled execution with {len(connected_servers)} servers")
+                for server in connected_servers:
+                    server_name = getattr(server, 'name', 'unknown')
+                    log_technical("info", f"    - {server_name}")
                 
+                # 创建带MCP服务器的Agent
                 agent = Agent(
                     name=self.config.agent.name,
                     instructions=self.instructions,
@@ -785,27 +856,24 @@ class TinyAgent:
                 # 包装Agent以启用详细的MCP工具调用日志记录
                 logged_agent = MCPToolCallLogger(agent, use_streaming=self.use_streaming)
                 
-                mcp_tool_logger.info(f"🎯 Starting MCP-enabled agent run with {len(connected_servers)} servers:")
-                for server in connected_servers:
-                    server_name = getattr(server, 'name', 'unknown')
-                    mcp_tool_logger.info(f"    - {server_name}")
-                
                 # 运行包装的代理，它会自动记录工具调用
                 result = await logged_agent.run(message, **kwargs)
                 
-                self.logger.info("Agent execution completed successfully")
+                log_agent("Task completed successfully")
                 return result
                 
-            finally:
-                # 清理连接的服务器
-                for server in connected_servers:
-                    try:
-                        await server.close()
-                    except Exception as e:
-                        server_name = getattr(server, 'name', 'unknown')
-                        self.logger.debug(f"Error closing server {server_name}: {e}")
-        
-        return await connect_and_run()
+        except Exception as e:
+            log_technical("error", f"Error running agent: {e}")
+            raise
+            
+        finally:
+            # 清理连接的服务器
+            for server in connected_servers:
+                try:
+                    await server.close()
+                except Exception as e:
+                    server_name = getattr(server, 'name', 'unknown')
+                    log_technical("debug", f"Error closing server {server_name}: {e}")
 
     async def _connect_single_server(self, server_config):
         """

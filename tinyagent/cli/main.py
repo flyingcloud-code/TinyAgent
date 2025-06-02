@@ -16,13 +16,12 @@ import os
 from ..core.config import get_config, set_profile
 from ..core.agent import create_agent, AGENTS_AVAILABLE
 from ..mcp.manager import MCPServerManager
+from ..core.logging import setup_logging, log_user, log_agent, log_technical
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Enhanced logging will be set up by individual commands
+# Don't use basic logging.basicConfig anymore
+
+logger = None  # Will be set up when config is loaded
 
 @click.group()
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose logging')
@@ -30,16 +29,30 @@ logger = logging.getLogger(__name__)
 @click.option('--config-dir', type=click.Path(exists=True), help='Path to configuration directory')
 def cli(verbose: bool, profile: Optional[str], config_dir: Optional[str]):
     """TinyAgent - Multi-step agent framework with MCP tool integration."""
-    if verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    global logger
     
     # Set global configuration options
     if profile:
         set_profile(profile)
-        logger.info(f"Using configuration profile: {profile}")
     
-    if config_dir:
-        logger.info(f"Using config directory: {config_dir}")
+    # Load configuration and set up enhanced logging
+    try:
+        config = get_config(profile)
+        logger = setup_logging(config.logging)
+        
+        if verbose:
+            # Override to show more technical details in verbose mode
+            config.logging.console_level = "INFO"
+            logger = setup_logging(config.logging)
+        
+        log_technical("info", f"TinyAgent CLI started with profile: {profile or 'development'}")
+        
+    except Exception as e:
+        # Fallback to basic logging if enhanced logging fails
+        import logging
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
+        logger.error(f"Failed to set up enhanced logging: {e}")
 
 @cli.command()
 @click.argument('prompt', required=True)
@@ -51,31 +64,39 @@ def run(prompt: str, model: Optional[str], instructions: Optional[str],
         output: Optional[str], api_key: Optional[str]):
     """Run TinyAgent with a prompt."""
     try:
+        log_user("Starting TinyAgent...")
+        log_user(f"Task: {prompt}")
+        
         # Create agent
+        log_agent("Initializing agent...")
         agent = create_agent(
             model=model,
             instructions=instructions,
             api_key=api_key
         )
         
-        click.echo(f"🤖 Running TinyAgent with model: {agent.model_name}")
-        click.echo(f"📝 Prompt: {prompt}")
-        click.echo("=" * 50)
+        log_agent(f"Using model: {agent.model_name}")
+        log_technical("info", f"Agent config: {agent.config.agent.name}")
         
         # Run agent
+        log_agent("Processing your request...")
         result = agent.run_sync(prompt)
         
         # Display result
         output_text = str(result.final_output)
+        log_user("[OK] Task completed!")
+        click.echo("\n" + "="*50)
         click.echo(output_text)
+        click.echo("="*50)
         
         # Save to file if requested
         if output:
             Path(output).write_text(output_text, encoding='utf-8')
-            click.echo(f"\n💾 Output saved to: {output}")
+            log_user(f"[SAVE] Output saved to: {output}")
             
     except Exception as e:
-        click.echo(f"❌ Error: {e}", err=True)
+        log_user(f"[ERROR] {e}")
+        log_technical("error", f"Full error details: {e}", "tinyagent.cli")
         sys.exit(1)
 
 @cli.command()
@@ -92,7 +113,7 @@ def status(verbose: bool, profile: Optional[str]):
         
         # Show which profile is active
         active_profile = profile or config_manager.profile
-        click.echo("🔧 TinyAgent Configuration Status")
+        click.echo("[CONFIG] TinyAgent Configuration Status")
         click.echo(f"Active Profile: {active_profile}")
         
         # Show available profiles
@@ -118,12 +139,12 @@ def status(verbose: bool, profile: Optional[str]):
         # Check API key
         api_key = os.getenv(config.llm.api_key_env)
         if api_key:
-            click.echo(f"✅ API Key: Found ({config.llm.api_key_env})")
+            click.echo(f"[OK] API Key: Found ({config.llm.api_key_env})")
         else:
-            click.echo(f"❌ API Key: Not found ({config.llm.api_key_env})")
+            click.echo(f"[ERROR] API Key: Not found ({config.llm.api_key_env})")
         
         # MCP Server status
-        click.echo("\n🔌 MCP Servers:")
+        click.echo("\n[MCP] MCP Servers:")
         if not config.mcp.enabled:
             click.echo("  MCP is disabled")
         else:
@@ -141,7 +162,7 @@ def status(verbose: bool, profile: Optional[str]):
                 click.echo("  No MCP servers configured")
             else:
                 for info in server_info:
-                    status_icon = "✅" if info.status == "created" else "❌"
+                    status_icon = "[OK]" if info.status == "created" else "[FAIL]"
                     click.echo(f"  {status_icon} {info.name} ({info.type}) - {info.status}")
                     if verbose:
                         click.echo(f"    Description: {info.config.get('description', 'N/A')}")
@@ -151,18 +172,18 @@ def status(verbose: bool, profile: Optional[str]):
         
         # Check if agents SDK is available
         if AGENTS_AVAILABLE:
-            click.echo("\n✅ OpenAI Agents SDK: Available")
+            click.echo("\n[OK] OpenAI Agents SDK: Available")
         else:
-            click.echo("\n❌ OpenAI Agents SDK: Not available")
+            click.echo("\n[ERROR] OpenAI Agents SDK: Not available")
         
         # Environment information
         if verbose:
-            click.echo(f"\n🌍 Environment:")
+            click.echo(f"\n[ENV] Environment:")
             click.echo(f"Env File: {config.environment.env_file}")
             click.echo(f"Env Prefix: {config.environment.env_prefix}")
             
     except Exception as e:
-        click.echo(f"❌ Error getting status: {e}")
+        click.echo(f"[ERROR] Error getting status: {e}")
         if verbose:
             import traceback
             click.echo(traceback.format_exc())
@@ -176,7 +197,7 @@ def list_profiles():
         config_manager = get_config_manager()
         profiles = config_manager.get_available_profiles()
         
-        click.echo("📋 Available Configuration Profiles")
+        click.echo("[PROFILES] Available Configuration Profiles")
         click.echo("=" * 35)
         
         if not profiles:
@@ -187,15 +208,15 @@ def list_profiles():
             # Try to load profile to get description
             try:
                 config = config_manager.load_config(profile=profile_name)
-                click.echo(f"✅ {profile_name}")
+                click.echo(f"[OK] {profile_name}")
                 click.echo(f"   Agent: {config.agent.name}")
                 click.echo(f"   LLM: {config.llm.provider}/{config.llm.model}")
                 click.echo()
             except Exception as e:
-                click.echo(f"❌ {profile_name} (error loading: {e})")
+                click.echo(f"[ERROR] {profile_name} (error loading: {e})")
         
     except Exception as e:
-        click.echo(f"❌ Error listing profiles: {e}", err=True)
+        click.echo(f"[ERROR] Error listing profiles: {e}", err=True)
         sys.exit(1)
 
 @cli.command()
@@ -204,7 +225,7 @@ def list_servers():
     try:
         config = get_config()
         
-        click.echo("🔌 MCP Servers")
+        click.echo("[SERVERS] MCP Servers")
         click.echo("=" * 20)
         
         if not config.mcp.servers:
@@ -212,7 +233,7 @@ def list_servers():
             return
         
         for name, server_config in config.mcp.servers.items():
-            status_icon = "✅" if server_config.enabled else "❌"
+            status_icon = "[OK]" if server_config.enabled else "[OFF]"
             click.echo(f"{status_icon} {name}")
             click.echo(f"   Type: {server_config.type}")
             click.echo(f"   Description: {server_config.description}")
@@ -227,7 +248,7 @@ def list_servers():
             click.echo()
             
     except Exception as e:
-        click.echo(f"❌ Error listing servers: {e}", err=True)
+        click.echo(f"[ERROR] Error listing servers: {e}", err=True)
         sys.exit(1)
 
 @cli.group()
@@ -261,19 +282,19 @@ def prd(title: str, output: Optional[str], format: str):
         """
         
         agent = create_agent()
-        click.echo(f"📋 Generating PRD for: {title}")
+        click.echo(f"[PRD] Generating PRD for: {title}")
         
         result = agent.run_sync(prompt)
         output_text = str(result.final_output)
         
         if output:
             Path(output).write_text(output_text, encoding='utf-8')
-            click.echo(f"💾 PRD saved to: {output}")
+            click.echo(f"[SAVE] PRD saved to: {output}")
         else:
             click.echo(output_text)
             
     except Exception as e:
-        click.echo(f"❌ Error generating PRD: {e}", err=True)
+        click.echo(f"[ERROR] Error generating PRD: {e}", err=True)
         sys.exit(1)
 
 @generate.command()
@@ -302,19 +323,19 @@ def design(system_name: str, output: Optional[str], format: str):
         """
         
         agent = create_agent()
-        click.echo(f"🏗️ Generating system design for: {system_name}")
+        click.echo(f"[DESIGN] Generating system design for: {system_name}")
         
         result = agent.run_sync(prompt)
         output_text = str(result.final_output)
         
         if output:
             Path(output).write_text(output_text, encoding='utf-8')
-            click.echo(f"💾 Design document saved to: {output}")
+            click.echo(f"[SAVE] Design document saved to: {output}")
         else:
             click.echo(output_text)
             
     except Exception as e:
-        click.echo(f"❌ Error generating design: {e}", err=True)
+        click.echo(f"[ERROR] Error generating design: {e}", err=True)
         sys.exit(1)
 
 @generate.command()
@@ -343,19 +364,19 @@ def analysis(topic: str, output: Optional[str], format: str):
         """
         
         agent = create_agent()
-        click.echo(f"📊 Generating analysis for: {topic}")
+        click.echo(f"[ANALYSIS] Generating analysis for: {topic}")
         
         result = agent.run_sync(prompt)
         output_text = str(result.final_output)
         
         if output:
             Path(output).write_text(output_text, encoding='utf-8')
-            click.echo(f"💾 Analysis saved to: {output}")
+            click.echo(f"[SAVE] Analysis saved to: {output}")
         else:
             click.echo(output_text)
             
     except Exception as e:
-        click.echo(f"❌ Error generating analysis: {e}", err=True)
+        click.echo(f"[ERROR] Error generating analysis: {e}", err=True)
         sys.exit(1)
 
 @cli.command()
@@ -365,13 +386,13 @@ def interactive(api_key: Optional[str]):
     try:
         agent = create_agent(api_key=api_key)
         
-        click.echo("🤖 TinyAgent Interactive Mode")
+        click.echo("[INTERACTIVE] TinyAgent Interactive Mode")
         click.echo("Type 'quit', 'exit', or press Ctrl+C to exit")
         click.echo("=" * 40)
         
         while True:
             try:
-                prompt = click.prompt("\n💬 You", type=str)
+                prompt = click.prompt("\n[USER] You", type=str)
                 
                 if prompt.lower() in ['quit', 'exit', 'q']:
                     break
@@ -379,7 +400,7 @@ def interactive(api_key: Optional[str]):
                 if prompt.strip() == '':
                     continue
                 
-                click.echo("🤖 TinyAgent:", nl=False)
+                click.echo("[AGENT] TinyAgent:", nl=False)
                 result = agent.run_sync(prompt)
                 click.echo(f" {result.final_output}")
                 
@@ -388,12 +409,12 @@ def interactive(api_key: Optional[str]):
             except EOFError:
                 break
             except Exception as e:
-                click.echo(f"❌ Error: {e}", err=True)
+                click.echo(f"[ERROR] Error: {e}", err=True)
         
-        click.echo("\n👋 Goodbye!")
+        click.echo("\n[BYE] Goodbye!")
         
     except Exception as e:
-        click.echo(f"❌ Error starting interactive mode: {e}", err=True)
+        click.echo(f"[ERROR] Error starting interactive mode: {e}", err=True)
         sys.exit(1)
 
 @cli.command()
@@ -408,29 +429,29 @@ def test_mcp(server: Optional[str]):
             # Test specific server
             server_config = config.mcp.servers.get(server)
             if not server_config:
-                click.echo(f"❌ Server '{server}' not found in configuration")
+                click.echo(f"[ERROR] Server '{server}' not found in configuration")
                 sys.exit(1)
             enabled_servers = [server_config]
         
         if not enabled_servers:
-            click.echo("❌ No enabled MCP servers found")
+            click.echo("[ERROR] No enabled MCP servers found")
             sys.exit(1)
         
-        click.echo("🧪 Testing MCP Server Connections")
+        click.echo("[TEST] Testing MCP Server Connections")
         click.echo("=" * 35)
         
         mcp_manager = MCPServerManager(enabled_servers)
         servers = mcp_manager.initialize_servers()
         
-        click.echo(f"\n✅ Successfully initialized {len(servers)} out of {len(enabled_servers)} servers")
+        click.echo(f"\n[OK] Successfully initialized {len(servers)} out of {len(enabled_servers)} servers")
         
         # Show server info
         for info in mcp_manager.get_server_info():
-            status_icon = "✅" if info.status == "created" else "❌"
+            status_icon = "[OK]" if info.status == "created" else "[FAIL]"
             click.echo(f"{status_icon} {info.name} ({info.type}) - {info.status}")
         
     except Exception as e:
-        click.echo(f"❌ Error testing MCP servers: {e}", err=True)
+        click.echo(f"[ERROR] Error testing MCP servers: {e}", err=True)
         sys.exit(1)
 
 def main():
