@@ -401,8 +401,10 @@ class TinyAgent:
         ]
         self.mcp_manager = MCPServerManager(enabled_servers)
         
-        # Initialize MCP servers
-        self.mcp_servers = self.mcp_manager.initialize_servers()
+        # Persistent connection management
+        self._persistent_connections = {}  # server_name -> connection
+        self._connection_status = {}       # server_name -> status
+        self._connections_initialized = False
         
         # Create the agent (delayed creation)
         self._agent = None
@@ -416,7 +418,7 @@ class TinyAgent:
             'total_duration': 0.0
         }
         
-        log_technical("info", f"TinyAgent initialized with {len(self.mcp_servers)} MCP servers (streaming: {self.use_streaming})")
+        log_technical("info", f"TinyAgent initialized with {len(enabled_servers)} MCP servers (streaming: {self.use_streaming})")
         log_agent("Agent ready for tasks")
     
     def _should_use_litellm(self, model_name: str) -> bool:
@@ -628,77 +630,270 @@ class TinyAgent:
             Agent execution result
         """
         try:
-            # 如果有MCP服务器，需要在async with语句中连接它们
-            if self.mcp_servers:
-                return await self._run_with_mcp_servers(message, **kwargs)
+            # First, try without MCP tools for simple conversations
+            # This provides fast response for basic interactions
+            log_technical("info", f"Running agent with message: {message[:100]}...")
+            
+            # Check if message likely needs tools (simple heuristic)
+            needs_tools = self._message_likely_needs_tools(message)
+            
+            if not needs_tools:
+                # Try simple conversation without MCP tools first
+                log_technical("info", "Attempting simple conversation without MCP tools")
+                try:
+                    simple_agent = self._create_simple_agent()
+                    result = await Runner.run(
+                        starting_agent=simple_agent,
+                        input=message,
+                        **kwargs
+                    )
+                    log_technical("info", "Simple conversation completed successfully")
+                    return result
+                except Exception as e:
+                    log_technical("info", f"Simple conversation failed: {e}, falling back to MCP mode")
+                    # Fall through to MCP mode
             else:
-                # 没有MCP服务器，直接运行
-                agent = self.get_agent()
-                self.logger.info(f"Running agent with message: {message[:100]}...")
-                
-                result = await Runner.run(
-                    starting_agent=agent,
-                    input=message,
-                    **kwargs
-                )
-                
-                self.logger.info("Agent execution completed successfully")
-                return result
+                log_technical("info", "Message likely needs tools, using MCP mode")
+            
+            # Use MCP tools (lazy loading)
+            return await self._run_with_mcp_tools(message, **kwargs)
             
         except Exception as e:
-            self.logger.error(f"Agent execution failed: {e}")
+            log_technical("error", f"Agent execution failed: {e}")
             raise
 
-    async def _run_with_mcp_servers(self, message: str, **kwargs) -> Any:
+    def _message_likely_needs_tools(self, message: str) -> bool:
         """
-        Run the agent with MCP servers properly connected.
+        Simple heuristic to determine if a message likely needs MCP tools.
         
         Args:
-            message: Input message for the agent
-            **kwargs: Additional arguments passed to Runner.run
+            message: Input message to analyze
+            
+        Returns:
+            True if tools are likely needed, False for simple conversation
+        """
+        message_lower = message.lower()
+        
+        # Keywords that typically require tools
+        tool_keywords = [
+            'file', 'write', 'read', 'create', 'save', 'open', 'edit',
+            'search', 'find', 'analyze', 'fetch', 'download', 'upload',
+            'think', 'plan', 'step', 'break down', 'sequential',
+            'document', 'report', 'generate', 'build', 'make'
+        ]
+        
+        # Check for tool-related keywords
+        for keyword in tool_keywords:
+            if keyword in message_lower:
+                return True
+        
+        # Simple conversation indicators
+        simple_patterns = [
+            'hello', 'hi', 'how are you', 'what can you do', 
+            'introduce yourself', 'who are you', 'help', 'quit', 'exit'
+        ]
+        
+        for pattern in simple_patterns:
+            if pattern in message_lower:
+                return False
+        
+        # Default to not needing tools for short, simple messages
+        return len(message.split()) > 10
+
+    def _create_simple_agent(self) -> Agent:
+        """
+        Create a simple agent without MCP servers for basic conversations.
+        
+        Returns:
+            Agent instance without MCP tools
+        """
+        try:
+            # Create model instance
+            model_instance = self._create_model_instance(self.model_name)
+            
+            # Create agent without MCP servers
+            agent_kwargs = {
+                "name": self.config.agent.name,
+                "instructions": self.instructions,
+                "model": model_instance
+                # Note: no mcp_servers parameter
+            }
+            
+            # Add model_settings only for non-LiteLLM models
+            if not self._should_use_litellm(self.model_name):
+                from agents import ModelSettings
+                agent_kwargs["model_settings"] = ModelSettings(temperature=self.config.llm.temperature)
+            
+            return Agent(**agent_kwargs)
+            
+        except Exception as e:
+            log_technical("error", f"Failed to create simple agent: {e}")
+            raise
+
+    async def _run_with_mcp_tools(self, message: str, **kwargs) -> Any:
+        """
+        Run agent with MCP tools (lazy loading).
+        
+        Args:
+            message: Input message
+            **kwargs: Additional arguments
             
         Returns:
             Agent execution result
         """
-        from agents.mcp import MCPServerStdio, MCPServerSse, MCPServerStreamableHttp
-        
-        # 收集所有需要连接的服务器实例
-        server_instances = []
-        
         try:
-            # 为每个MCP服务器创建实例
-            for server_config in self.mcp_manager.server_configs:
-                if not server_config.enabled:
-                    continue
-                    
-                try:
-                    server_instance = self._create_server_instance(server_config)
-                    if server_instance:
-                        server_instances.append(server_instance)
-                except Exception as e:
-                    self.logger.error(f"Failed to create MCP server {server_config.name}: {e}")
-                    continue
+            # Ensure MCP connections (lazy loading)
+            connected_servers = await self._ensure_mcp_connections()
             
-            if not server_instances:
-                self.logger.info("No MCP servers available, running without tools")
-                agent = self.get_agent()
+            if not connected_servers:
+                # No MCP servers available, use simple agent
+                log_agent("No MCP servers available, running without tools")
+                log_technical("info", "No MCP servers connected, falling back to simple mode")
                 
+                simple_agent = self._create_simple_agent()
                 result = await Runner.run(
-                    starting_agent=agent,
+                    starting_agent=simple_agent,
                     input=message,
                     **kwargs
                 )
-                
-                self.logger.info("Agent execution completed successfully")
                 return result
-            
-            # 使用async with来管理所有服务器的连接
-            return await self._run_with_connected_servers(server_instances, message, **kwargs)
+            else:
+                # Use MCP-enabled agent
+                log_tool(f"Using MCP tools: {len(connected_servers)} servers available")
+                
+                # Create MCP-enabled agent
+                agent = Agent(
+                    name=self.config.agent.name,
+                    instructions=self.instructions,
+                    model=self._create_model_instance(self.model_name),
+                    mcp_servers=connected_servers
+                )
+                
+                # Wrap with tool call logger
+                logged_agent = MCPToolCallLogger(agent, use_streaming=self.use_streaming)
+                
+                # Run with MCP tools
+                result = await logged_agent.run(message, **kwargs)
+                return result
                 
         except Exception as e:
-            self.logger.error(f"Failed to run agent with MCP servers: {e}")
+            log_technical("error", f"Error running with MCP tools: {e}")
             raise
+
+    async def _ensure_mcp_connections(self) -> List[Any]:
+        """
+        Ensure MCP connections are established (lazy loading).
+        Only connects when actually needed and reuses existing connections.
+        
+        Returns:
+            List of connected MCP server instances
+        """
+        if self._connections_initialized:
+            # Return cached connections
+            return list(self._persistent_connections.values())
+        
+        log_technical("info", "Initializing MCP connections (lazy loading)")
+        start_time = time.time()
+        
+        # Get server configs
+        enabled_servers = [
+            server for server in self.mcp_manager.server_configs 
+            if server.enabled
+        ]
+        
+        if not enabled_servers:
+            log_technical("info", "No MCP servers to connect")
+            self._connections_initialized = True
+            return []
+        
+        # Connect to each server
+        for server_config in enabled_servers:
+            try:
+                log_agent(f"Connecting to MCP server: {server_config.name}")
+                log_technical("info", f"Attempting to connect to MCP server: {server_config.name}")
+                
+                # Create server instance
+                server_instance = self._create_server_instance(server_config)
+                if not server_instance:
+                    continue
+                
+                # Connect with timeout
+                log_technical("info", f"Using 120s timeout for MCP server connection: {server_config.name}")
+                await asyncio.wait_for(server_instance.connect(), timeout=120.0)
+                
+                # Store successful connection
+                self._persistent_connections[server_config.name] = server_instance
+                self._connection_status[server_config.name] = "connected"
+                
+                log_agent(f"Connected to {server_config.name}")
+                log_technical("info", f"Successfully connected to MCP server: {server_config.name}")
+                
+                # Add to global cleanup list
+                _active_servers.append(server_instance)
+                
+            except asyncio.TimeoutError:
+                log_agent(f"Connection timeout for {server_config.name}")
+                log_technical("warning", f"MCP server {server_config.name} connection timed out")
+                self._connection_status[server_config.name] = "timeout"
+                continue
+            except Exception as e:
+                log_agent(f"Connection failed for {server_config.name}: {str(e)}")
+                log_technical("error", f"Failed to connect to MCP server {server_config.name}: {e}")
+                self._connection_status[server_config.name] = "failed"
+                continue
+        
+        self._connections_initialized = True
+        connected_count = len(self._persistent_connections)
+        duration = time.time() - start_time
+        
+        log_technical("info", f"MCP connection initialization completed: {connected_count}/{len(enabled_servers)} servers in {duration:.2f}s")
+        
+        if connected_count > 0:
+            log_tool(f"MCP servers ready: {connected_count} servers available")
+        
+        return list(self._persistent_connections.values())
     
+    def _check_connection_health(self, server_name: str) -> bool:
+        """Check if a connection is still healthy"""
+        if server_name not in self._persistent_connections:
+            return False
+        
+        connection = self._persistent_connections[server_name]
+        # Basic health check - can be enhanced with ping/heartbeat
+        return hasattr(connection, '_stream') and connection._stream and not connection._stream.closed
+    
+    async def _reconnect_if_needed(self, server_name: str) -> bool:
+        """Reconnect a server if the connection is unhealthy"""
+        if self._check_connection_health(server_name):
+            return True
+        
+        log_technical("info", f"Reconnecting unhealthy MCP server: {server_name}")
+        
+        # Find server config
+        server_config = None
+        for config in self.mcp_manager.server_configs:
+            if config.name == server_name:
+                server_config = config
+                break
+        
+        if not server_config:
+            return False
+        
+        try:
+            # Create new instance and connect
+            server_instance = self._create_server_instance(server_config)
+            if server_instance:
+                await asyncio.wait_for(server_instance.connect(), timeout=60.0)
+                self._persistent_connections[server_name] = server_instance
+                self._connection_status[server_name] = "connected"
+                log_technical("info", f"Successfully reconnected to MCP server: {server_name}")
+                return True
+        except Exception as e:
+            log_technical("error", f"Failed to reconnect to MCP server {server_name}: {e}")
+            self._connection_status[server_name] = "failed"
+        
+        return False
+
     def _create_server_instance(self, server_config):
         """
         创建MCP服务器实例（不连接）
@@ -771,117 +966,6 @@ class TinyAgent:
             log_technical("error", f"Failed to create MCP server {server_config.name}: {e}")
             return None
     
-    async def _run_with_connected_servers(self, server_instances, message: str, **kwargs):
-        """
-        使用连接的服务器运行Agent
-        
-        Args:
-            server_instances: MCP服务器实例列表
-            message: 输入消息
-            **kwargs: 传递给Runner.run的额外参数
-            
-        Returns:
-            Agent执行结果
-        """
-        import asyncio
-        connected_servers = []
-        
-        # 尝试连接所有服务器
-        for server_instance in server_instances:
-            try:
-                server_name = getattr(server_instance, 'name', 'unknown')
-                log_agent(f"Connecting to MCP server: {server_name}")
-                log_technical("info", f"Attempting to connect to MCP server: {server_name}")
-                
-                # 对于所有MCP服务器，使用统一的长超时时间（因为npx可能需要下载包）
-                log_technical("info", f"Using 120s timeout for MCP server connection: {server_name}")
-                await asyncio.wait_for(server_instance.connect(), timeout=120.0)
-                
-                connected_servers.append(server_instance)
-                log_agent(f"Connected to {server_name}")
-                log_technical("info", f"Successfully connected to MCP server: {server_name}")
-                
-                # 添加到全局清理列表
-                _active_servers.append(server_instance)
-                
-            except asyncio.TimeoutError:
-                server_name = getattr(server_instance, 'name', 'unknown')
-                log_agent(f"Connection timeout for {server_name}")
-                log_technical("warning", f"MCP server {server_name} connection timed out (possibly downloading packages)")
-                continue
-            except Exception as e:
-                server_name = getattr(server_instance, 'name', 'unknown')
-                log_agent(f"Connection failed for {server_name}: {str(e)}")
-                log_technical("error", f"Failed to connect to MCP server {server_name}: {e}")
-                continue
-        
-        try:
-            if not connected_servers:
-                # 没有成功连接的服务器，回退到无工具模式
-                log_agent("No MCP servers available, running without tools")
-                log_technical("warning", "All MCP server connections failed, falling back to no-tools mode")
-                
-                # 创建无MCP服务器的Agent
-                agent = Agent(
-                    name=self.config.agent.name,
-                    instructions=self.instructions,
-                    model=self._create_model_instance(self.model_name)
-                    # 注意：不传递 mcp_servers 参数
-                )
-                
-                # 直接运行，不使用工具调用日志记录
-                result = await Runner.run(
-                    starting_agent=agent,
-                    input=message,
-                    **kwargs
-                )
-                
-                log_agent("Task completed successfully (no-tools mode)")
-                return result
-            else:
-                # 有成功连接的服务器，正常创建Agent
-                log_tool(f"Starting MCP-enabled execution with {len(connected_servers)} servers")
-                for server in connected_servers:
-                    server_name = getattr(server, 'name', 'unknown')
-                    log_technical("info", f"    - {server_name}")
-                
-                # 创建带MCP服务器的Agent
-                agent = Agent(
-                    name=self.config.agent.name,
-                    instructions=self.instructions,
-                    model=self._create_model_instance(self.model_name),
-                    mcp_servers=connected_servers
-                )
-                
-                # 包装Agent以启用详细的MCP工具调用日志记录
-                logged_agent = MCPToolCallLogger(agent, use_streaming=self.use_streaming)
-                
-                # 运行包装的代理，它会自动记录工具调用
-                result = await logged_agent.run(message, **kwargs)
-                
-                log_agent("Task completed successfully")
-                return result
-                
-        except Exception as e:
-            log_technical("error", f"Error running agent: {e}")
-            raise
-            
-        finally:
-            # 清理连接的服务器
-            for server in connected_servers:
-                try:
-                    await server.close()
-                except Exception as e:
-                    server_name = getattr(server, 'name', 'unknown')
-                    log_technical("debug", f"Error closing server {server_name}: {e}")
-
-    async def _connect_single_server(self, server_config):
-        """
-        连接单个MCP服务器 - 已弃用，使用_create_server_instance和_run_with_connected_servers代替
-        """
-        # 这个方法已经不再使用，保留以防兼容性问题
-        pass
-    
     def run_sync(self, message: str, **kwargs) -> Any:
         """
         Run the agent synchronously.
@@ -894,40 +978,43 @@ class TinyAgent:
             Agent execution result
         """
         try:
-            # 如果有MCP服务器，需要使用异步方法
-            if self.mcp_servers:
-                # 创建新的事件循环来运行异步方法
+            # Always use async method for new architecture
+            # Check if we have any configured MCP servers
+            has_mcp_servers = len(self.mcp_manager.server_configs) > 0
+            
+            if has_mcp_servers:
+                # Use async method for potential MCP operations
                 try:
-                    # 尝试获取当前事件循环
+                    # Try to get current event loop
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
-                        # 如果在已运行的事件循环中，创建新的线程来运行
+                        # If in already running event loop, create new thread
                         import concurrent.futures
                         with concurrent.futures.ThreadPoolExecutor() as executor:
                             future = executor.submit(self._run_in_new_loop, message, **kwargs)
                             return future.result()
                     else:
-                        # 如果事件循环未运行，直接运行
+                        # If event loop not running, run directly
                         return loop.run_until_complete(self.run(message, **kwargs))
                 except RuntimeError:
-                    # 没有事件循环，创建新的
+                    # No event loop, create new one
                     return asyncio.run(self.run(message, **kwargs))
             else:
-                # 没有MCP服务器，可以直接使用同步方法
-                agent = self.get_agent()
-                self.logger.info(f"Running agent synchronously with message: {message[:100]}...")
+                # No MCP servers configured, can use simple sync method
+                simple_agent = self._create_simple_agent()
+                log_technical("info", f"Running agent synchronously with message: {message[:100]}...")
                 
                 result = Runner.run_sync(
-                    starting_agent=agent,
+                    starting_agent=simple_agent,
                     input=message,
                     **kwargs
                 )
                 
-                self.logger.info("Agent execution completed successfully")
+                log_technical("info", "Agent execution completed successfully")
                 return result
             
         except Exception as e:
-            self.logger.error(f"Agent execution failed: {e}")
+            log_technical("error", f"Agent execution failed: {e}")
             raise
     
     def _run_in_new_loop(self, message: str, **kwargs) -> Any:
@@ -976,25 +1063,81 @@ class TinyAgent:
         """
         Reload MCP servers from configuration.
         """
-        self.logger.info("Reloading MCP servers")
+        log_technical("info", "Reloading MCP servers")
         
-        # Reinitialize servers
+        # Close existing connections
+        if self._persistent_connections:
+            log_technical("info", "Closing existing MCP connections for reload")
+            # Note: This is sync method, should use async close in production
+            self.reset_mcp_connections()
+        
+        # Reinitialize server manager
         config = get_config()
         enabled_servers = [
             server for server in config.mcp.servers.values() 
             if server.enabled
         ]
         self.mcp_manager = MCPServerManager(enabled_servers)
-        self.mcp_servers = self.mcp_manager.initialize_servers()
+        
+        # Reset connection state for lazy loading
+        self._persistent_connections.clear()
+        self._connection_status.clear()
+        self._connections_initialized = False
         
         # Recreate agent with new servers
         self._agent = None  # Force recreation on next access
         
-        self.logger.info(f"Reloaded {len(self.mcp_servers)} MCP servers")
+        log_technical("info", f"Reloaded {len(enabled_servers)} MCP server configurations")
+        log_technical("info", "MCP connections will be established on next tool use")
     
     def __repr__(self) -> str:
-        return f"TinyAgent(name='{self.config.agent.name}', model='{self.model_name}', mcp_servers={len(self.mcp_servers)})"
+        connected_servers = len(self._persistent_connections) if self._connections_initialized else len(self.mcp_manager.server_configs)
+        return f"TinyAgent(name='{self.config.agent.name}', model='{self.model_name}', mcp_servers={connected_servers})"
 
+    def get_mcp_connection_status(self) -> Dict[str, str]:
+        """
+        Get the status of all MCP connections.
+        
+        Returns:
+            Dictionary mapping server names to their connection status
+        """
+        return dict(self._connection_status)
+    
+    def get_active_mcp_servers(self) -> List[str]:
+        """
+        Get list of currently active MCP server names.
+        
+        Returns:
+            List of active server names
+        """
+        return [name for name, status in self._connection_status.items() if status == "connected"]
+    
+    async def close_mcp_connections(self):
+        """Close all MCP connections and clean up resources."""
+        if not self._persistent_connections:
+            return
+        
+        log_technical("info", "Closing all MCP connections")
+        
+        for server_name, connection in self._persistent_connections.items():
+            try:
+                await connection.close()
+                log_technical("debug", f"Closed MCP connection: {server_name}")
+            except Exception as e:
+                log_technical("warning", f"Error closing MCP connection {server_name}: {e}")
+        
+        self._persistent_connections.clear()
+        self._connection_status.clear()
+        self._connections_initialized = False
+        
+        log_technical("info", "All MCP connections closed")
+    
+    def reset_mcp_connections(self):
+        """Reset MCP connection state (for debugging/testing)."""
+        self._persistent_connections.clear()
+        self._connection_status.clear()
+        self._connections_initialized = False
+        log_technical("info", "MCP connection state reset")
 
 def create_agent(
     name: Optional[str] = None,
