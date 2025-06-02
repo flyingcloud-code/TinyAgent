@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
 import json
+from datetime import datetime
 
 from agents import Agent, Runner
 
@@ -195,6 +196,21 @@ Output your analysis in structured JSON format following the TaskPlan schema."""
             # Return simple fallback plan
             return self._create_fallback_plan(user_input)
     
+    async def create_plan(self, task_description: str, context: Optional[Dict[str, Any]] = None) -> TaskPlan:
+        """
+        Create execution plan for a task (alias for analyze_and_plan for compatibility)
+        
+        Args:
+            task_description: Description of the task to plan
+            context: Optional context information
+            
+        Returns:
+            TaskPlan: Detailed execution plan
+        """
+        # For now, ignore context and delegate to analyze_and_plan
+        # TODO: Integrate context into planning process
+        return await self.analyze_and_plan(task_description)
+    
     def _create_planning_prompt(self, user_input: str) -> str:
         """Create detailed planning prompt for the agent"""
         return f"""Plan the execution of this user request:
@@ -274,8 +290,6 @@ Think step by step and be thorough."""
     
     def _create_fallback_plan(self, user_input: str) -> TaskPlan:
         """Create simple fallback plan when planning fails"""
-        from datetime import datetime
-        
         return TaskPlan(
             task_id=f"fallback_{hash(user_input) % 10000}",
             user_input=user_input,

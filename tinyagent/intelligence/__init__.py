@@ -9,6 +9,7 @@ from .selector import ToolSelector
 from .reasoner import ReasoningEngine
 from .actor import ActionExecutor
 from .observer import ResultObserver
+from .intelligent_agent import IntelligentAgent, IntelligentAgentConfig
 
 __all__ = [
     "TaskPlanner",
@@ -16,5 +17,7 @@ __all__ = [
     "ToolSelector",
     "ReasoningEngine",
     "ActionExecutor", 
-    "ResultObserver"
+    "ResultObserver",
+    "IntelligentAgent",
+    "IntelligentAgentConfig"
 ] 

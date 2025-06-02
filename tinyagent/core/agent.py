@@ -65,6 +65,16 @@ from ..core.logging import (
     MCPToolMetrics, USER_LEVEL, AGENT_LEVEL, TOOL_LEVEL
 )
 
+# Import intelligence components
+try:
+    from ..intelligence import IntelligentAgent, IntelligentAgentConfig
+    INTELLIGENCE_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"Intelligence components not available: {e}")
+    INTELLIGENCE_AVAILABLE = False
+    IntelligentAgent = None
+    IntelligentAgentConfig = None
+
 # Get the enhanced logger
 enhanced_logger = get_logger()
 logger = logging.getLogger(__name__)
@@ -532,7 +542,8 @@ class TinyAgent:
         instructions: Optional[str] = None,
         model_name: Optional[str] = None,
         api_key: Optional[str] = None,
-        use_streaming: Optional[bool] = None
+        use_streaming: Optional[bool] = None,
+        intelligent_mode: Optional[bool] = None
     ):
         """
         Initialize TinyAgent.
@@ -543,6 +554,7 @@ class TinyAgent:
             model_name: Model to use (overrides config)
             api_key: OpenAI API key (overrides environment)
             use_streaming: Whether to use streaming API for tool call logging (default: from config)
+            intelligent_mode: Whether to use intelligent ReAct mode (default: from config or True if available)
         """
         if not AGENTS_AVAILABLE:
             raise ImportError("OpenAI Agents SDK is required but not available")
@@ -555,6 +567,21 @@ class TinyAgent:
         # Use provided use_streaming, otherwise use config value
         self.use_streaming = use_streaming if use_streaming is not None else config.agent.use_streaming
         self.logger = logging.getLogger(__name__)
+        
+        # Set up intelligent mode
+        self.intelligent_mode = intelligent_mode
+        if self.intelligent_mode is None:
+            # Check if intelligence components are available and enabled in config
+            self.intelligent_mode = (INTELLIGENCE_AVAILABLE and 
+                                   getattr(config.agent, 'intelligent_mode', True))
+        
+        # Initialize intelligent agent if available and enabled
+        self._intelligent_agent = None
+        if self.intelligent_mode and INTELLIGENCE_AVAILABLE:
+            log_technical("info", "Intelligent mode enabled - will initialize IntelligentAgent")
+        elif not INTELLIGENCE_AVAILABLE:
+            log_technical("warning", "Intelligence components not available - using basic LLM mode")
+            self.intelligent_mode = False
         
         # Set up API key
         if api_key:
@@ -595,7 +622,8 @@ class TinyAgent:
             'total_duration': 0.0
         }
         
-        log_technical("info", f"TinyAgent initialized with {len(enabled_servers)} MCP servers (streaming: {self.use_streaming})")
+        mode_info = "intelligent" if self.intelligent_mode else "basic"
+        log_technical("info", f"TinyAgent initialized in {mode_info} mode with {len(enabled_servers)} MCP servers (streaming: {self.use_streaming})")
         log_agent("Agent ready for tasks")
     
     def _should_use_litellm(self, model_name: str) -> bool:
@@ -877,45 +905,274 @@ class TinyAgent:
             Agent execution result
         """
         try:
-            # First, try without MCP tools for simple conversations
-            # This provides fast response for basic interactions
             log_technical("info", f"Running agent with message: {message[:100]}...")
             
-            # Check if message likely needs tools (simple heuristic)
-            needs_tools = self._message_likely_needs_tools(message)
-            
-            if not needs_tools:
-                # Try simple conversation without MCP tools first
-                log_technical("info", "Attempting simple conversation without MCP tools")
-                try:
-                    simple_agent = self._create_simple_agent()
-                    
-                    # Filter out parameters that Runner.run doesn't accept
-                    filtered_kwargs = {}
-                    supported_params = ['max_turns', 'response_format', 'temperature', 'max_tokens']
-                    for key, value in kwargs.items():
-                        if key in supported_params:
-                            filtered_kwargs[key] = value
-                    
-                    result = await Runner.run(
-                        starting_agent=simple_agent,
-                        input=message,
-                        **filtered_kwargs
-                    )
-                    log_technical("info", "Simple conversation completed successfully")
-                    return result
-                except Exception as e:
-                    log_technical("info", f"Simple conversation failed: {e}, falling back to MCP mode")
-                    # Fall through to MCP mode
+            # Check if intelligent mode is enabled
+            if self.intelligent_mode and INTELLIGENCE_AVAILABLE:
+                log_technical("info", "Using intelligent mode with ReAct loop")
+                return await self._run_intelligent_mode(message, **kwargs)
             else:
-                log_technical("info", "Message likely needs tools, using MCP mode")
-            
-            # Use MCP tools (lazy loading)
-            return await self._run_with_mcp_tools(message, **kwargs)
+                log_technical("info", "Using basic LLM mode")
+                return await self._run_basic_mode(message, **kwargs)
             
         except Exception as e:
             log_technical("error", f"Agent execution failed: {e}")
             raise
+    
+    async def _run_intelligent_mode(self, message: str, **kwargs) -> Any:
+        """
+        Run the agent in intelligent mode using IntelligentAgent with ReAct loop
+        
+        Args:
+            message: Input message for the agent
+            **kwargs: Additional arguments
+            
+        Returns:
+            Intelligent agent execution result
+        """
+        try:
+            # Get the intelligent agent
+            intelligent_agent = self._get_intelligent_agent()
+            if not intelligent_agent:
+                log_technical("warning", "IntelligentAgent not available, falling back to basic mode")
+                return await self._run_basic_mode(message, **kwargs)
+            
+            # Register MCP tools with the intelligent agent if available
+            await self._register_mcp_tools_with_intelligent_agent(intelligent_agent)
+            
+            # Execute using intelligent agent with full ReAct loop
+            log_agent("Starting intelligent task execution with ReAct loop...")
+            result = await intelligent_agent.run(message, context=kwargs)
+            
+            # Log intelligent execution results
+            if isinstance(result, dict) and 'success' in result:
+                success = result.get('success', False)
+                iterations = result.get('reasoning', {}).get('iterations', 0)
+                tools_used = result.get('tools_used', [])
+                execution_time = result.get('execution_time', 0)
+                
+                log_agent(f"Task completed: success={success}, iterations={iterations}, "
+                         f"tools={len(tools_used)}, time={execution_time:.1f}s")
+                log_technical("info", f"Intelligent execution result: {result}")
+                
+                # Return the answer for compatibility
+                return SimpleResult(result.get('answer', 'Task completed successfully'))
+            else:
+                # Fallback if result format is unexpected
+                return result
+                
+        except Exception as e:
+            log_technical("error", f"Intelligent mode execution failed: {e}")
+            # Fallback to basic mode on error
+            log_agent("Falling back to basic mode due to intelligent mode error")
+            return await self._run_basic_mode(message, **kwargs)
+    
+    async def _run_basic_mode(self, message: str, **kwargs) -> Any:
+        """
+        Run the agent in basic mode (original implementation)
+        
+        Args:
+            message: Input message for the agent  
+            **kwargs: Additional arguments
+            
+        Returns:
+            Basic agent execution result
+        """
+        # First, try without MCP tools for simple conversations
+        # This provides fast response for basic interactions
+        
+        # Check if message likely needs tools (simple heuristic)
+        needs_tools = self._message_likely_needs_tools(message)
+        
+        if not needs_tools:
+            # Try simple conversation without MCP tools first
+            log_technical("info", "Attempting simple conversation without MCP tools")
+            try:
+                simple_agent = self._create_simple_agent()
+                
+                # Filter out parameters that Runner.run doesn't accept
+                filtered_kwargs = {}
+                supported_params = ['max_turns', 'response_format', 'temperature', 'max_tokens']
+                for key, value in kwargs.items():
+                    if key in supported_params:
+                        filtered_kwargs[key] = value
+                
+                result = await Runner.run(
+                    starting_agent=simple_agent,
+                    input=message,
+                    **filtered_kwargs
+                )
+                log_technical("info", "Simple conversation completed successfully")
+                return result
+            except Exception as e:
+                log_technical("info", f"Simple conversation failed: {e}, falling back to MCP mode")
+                # Fall through to MCP mode
+        else:
+            log_technical("info", "Message likely needs tools, using MCP mode")
+        
+        # Use MCP tools (lazy loading)
+        return await self._run_with_mcp_tools(message, **kwargs)
+    
+    async def _register_mcp_tools_with_intelligent_agent(self, intelligent_agent):
+        """
+        Register available MCP tools with the IntelligentAgent using EnhancedMCPServerManager
+        
+        Args:
+            intelligent_agent: The IntelligentAgent instance
+        """
+        try:
+            # Use enhanced MCP manager to get tool information with caching
+            if hasattr(self, 'mcp_manager') and self.mcp_manager:
+                # Check if it's the enhanced manager
+                if hasattr(self.mcp_manager, 'initialize_with_caching'):
+                    log_technical("info", "Using EnhancedMCPServerManager for tool registration")
+                    
+                    # Initialize with caching to populate tool cache
+                    cached_tools = await self.mcp_manager.initialize_with_caching()
+                    
+                    # Get all tools from cache
+                    all_tools = []
+                    total_servers = 0
+                    for server_name, tool_list in cached_tools.items():
+                        if tool_list:
+                            total_servers += 1
+                            # Convert ToolInfo objects to dictionary format for intelligent agent
+                            for tool_info in tool_list:
+                                tool_dict = {
+                                    'name': tool_info.name,
+                                    'description': tool_info.description,
+                                    'server': tool_info.server_name,
+                                    'category': tool_info.category,
+                                    'performance_metrics': tool_info.performance_metrics.__dict__ if tool_info.performance_metrics else {},
+                                    'last_updated': tool_info.last_updated.isoformat() if tool_info.last_updated else None,
+                                    'schema': tool_info.schema,
+                                    'function': None  # Will be handled by MCP execution
+                                }
+                                all_tools.append(tool_dict)
+                    
+                    # Register tools with intelligent agent
+                    if all_tools:
+                        intelligent_agent.register_mcp_tools(all_tools)
+                        log_technical("info", f"Enhanced registration: {len(all_tools)} tools from {total_servers} servers")
+                        log_agent(f"Registered {len(all_tools)} MCP tools with enhanced context")
+                        
+                        # Build enhanced tool context using context builder
+                        if hasattr(intelligent_agent, 'mcp_context_builder') and intelligent_agent.mcp_context_builder:
+                            try:
+                                # Build comprehensive tool context
+                                tool_context = intelligent_agent.mcp_context_builder.build_tool_context()
+                                
+                                if tool_context and tool_context.available_tools:
+                                    log_technical("info", f"Built enhanced tool context with {len(tool_context.available_tools)} tools")
+                                    
+                                    # Store context for future use in ReAct loop
+                                    intelligent_agent._current_tool_context = tool_context
+                                    intelligent_agent._tool_context_cache_valid = True
+                                    
+                                    # Log context summary
+                                    log_technical("info", f"Tool context servers: {list(tool_context.server_status.keys())}")
+                                    log_technical("info", f"Tool capabilities: {list(tool_context.capabilities_summary.keys())}")
+                                    
+                                    # Log performance summary if available
+                                    if tool_context.performance_summary:
+                                        perf_summary = tool_context.performance_summary
+                                        log_technical("info", f"Performance metrics: {perf_summary.get('overview', {})}")
+                                    
+                                    # Log recommendations
+                                    if tool_context.recommended_tools:
+                                        for category, tools in tool_context.recommended_tools.items():
+                                            if tools:
+                                                log_technical("debug", f"Recommended {category}: {tools}")
+                                
+                                else:
+                                    log_technical("warning", "Tool context built but no tools available")
+                                
+                            except Exception as context_error:
+                                log_technical("warning", f"Error building enhanced tool context: {context_error}")
+                                import traceback
+                                log_technical("debug", f"Context build traceback: {traceback.format_exc()}")
+                        
+                        # Verify enhanced tool cache is properly linked
+                        if hasattr(intelligent_agent, 'tool_cache') and intelligent_agent.tool_cache:
+                            cache_stats = intelligent_agent.tool_cache.get_cache_stats()
+                            log_technical("info", f"Enhanced tool cache stats: {cache_stats}")
+                        
+                        # Get enhanced performance summary
+                        if hasattr(self.mcp_manager, 'get_enhanced_performance_summary'):
+                            enhanced_perf = self.mcp_manager.get_enhanced_performance_summary()
+                            log_technical("debug", f"Enhanced MCP manager performance: {enhanced_perf}")
+                        
+                    else:
+                        log_technical("info", "No enhanced tools available to register")
+                        log_agent("No MCP tools available for enhanced registration")
+                else:
+                    # Fall back to basic manager functionality
+                    log_technical("warning", "MCP manager is not enhanced, using basic registration")
+                    await self._register_mcp_tools_basic(intelligent_agent)
+                
+            else:
+                # No MCP manager available
+                log_technical("warning", "Enhanced MCP manager not available, using basic registration")
+                await self._register_mcp_tools_basic(intelligent_agent)
+                
+        except Exception as e:
+            log_technical("error", f"Error in enhanced MCP tool registration: {e}")
+            import traceback
+            log_technical("debug", f"Enhanced registration traceback: {traceback.format_exc()}")
+            # Fallback to basic registration
+            log_technical("info", "Falling back to basic tool registration")
+            try:
+                await self._register_mcp_tools_basic(intelligent_agent)
+            except Exception as fallback_error:
+                log_technical("error", f"Fallback registration also failed: {fallback_error}")
+
+    async def _register_mcp_tools_basic(self, intelligent_agent):
+        """
+        Basic MCP tool registration (fallback method)
+        
+        Args:
+            intelligent_agent: The IntelligentAgent instance
+        """
+        try:
+            # Ensure MCP connections are established
+            connected_servers = await self._ensure_mcp_connections()
+            
+            if not connected_servers:
+                log_technical("info", "No MCP servers available for basic registration")
+                return
+            
+            # Collect all available tools from connected servers
+            mcp_tools = []
+            for server_name, connection in self._persistent_connections.items():
+                try:
+                    # Get tools from the connection
+                    if hasattr(connection, 'list_tools'):
+                        server_tools = await connection.list_tools()
+                        if hasattr(server_tools, 'tools'):
+                            for tool in server_tools.tools:
+                                mcp_tools.append({
+                                    'name': tool.name,
+                                    'description': tool.description or f"Tool from {server_name}",
+                                    'server': server_name,
+                                    'function': None  # Will be handled by MCP execution
+                                })
+                        else:
+                            log_technical("warning", f"Server {server_name} tools response format unexpected")
+                    else:
+                        log_technical("warning", f"Server {server_name} does not support list_tools")
+                except Exception as e:
+                    log_technical("warning", f"Error getting tools from {server_name}: {e}")
+                    continue
+            
+            # Register tools with intelligent agent
+            if mcp_tools:
+                intelligent_agent.register_mcp_tools(mcp_tools)
+                log_technical("info", f"Basic registration: {len(mcp_tools)} MCP tools")
+            else:
+                log_technical("info", "No MCP tools available to register")
+                
+        except Exception as e:
+            log_technical("error", f"Error in basic MCP tool registration: {e}")
 
     def _message_likely_needs_tools(self, message: str) -> bool:
         """
@@ -1633,6 +1890,86 @@ class TinyAgent:
         except Exception as e:
             log_technical("error", f"Sync streaming failed: {e}")
             yield f"[ERROR] {str(e)}"
+
+    def _get_intelligent_agent(self):
+        """Get or create the IntelligentAgent instance"""
+        if not self.intelligent_mode or not INTELLIGENCE_AVAILABLE:
+            return None
+        
+        if self._intelligent_agent is None:
+            # Create IntelligentAgent configuration
+            intelligent_config = IntelligentAgentConfig(
+                max_reasoning_iterations=getattr(self.config.agent, 'max_reasoning_iterations', 10),
+                confidence_threshold=getattr(self.config.agent, 'confidence_threshold', 0.8),
+                max_concurrent_actions=getattr(self.config.agent, 'max_concurrent_actions', 5),
+                action_timeout=getattr(self.config.agent, 'action_timeout', 60.0),
+                memory_max_context_turns=getattr(self.config.agent, 'memory_max_context_turns', 20),
+                use_detailed_observation=getattr(self.config.agent, 'use_detailed_observation', True),
+                enable_learning=getattr(self.config.agent, 'enable_learning', True)
+            )
+            
+            # Create base LLM agent for the intelligent agent
+            base_agent = self._create_simple_agent()
+            
+            # Create IntelligentAgent
+            self._intelligent_agent = IntelligentAgent(
+                llm_agent=base_agent,
+                config=intelligent_config
+            )
+            
+            # Initialize Enhanced MCP context builder if available
+            try:
+                # Import enhanced MCP context builder components
+                from ..mcp.context_builder import AgentContextBuilder
+                from ..mcp.cache import MCPToolCache
+                from ..mcp.manager import EnhancedMCPServerManager
+                
+                # Initialize enhanced MCP manager if not already done
+                if not hasattr(self, 'mcp_manager') or self.mcp_manager is None:
+                    # Create enhanced MCP manager with tool cache
+                    self.mcp_manager = EnhancedMCPServerManager(
+                        server_configs=self.config.mcp.servers,
+                        tool_cache=None,  # Will create its own cache
+                        cache_duration=300,  # 5 minutes
+                        enable_performance_tracking=True
+                    )
+                    log_technical("info", "Created EnhancedMCPServerManager for IntelligentAgent")
+                
+                # Ensure the MCP manager has a tool cache
+                if not hasattr(self.mcp_manager, 'tool_cache') or self.mcp_manager.tool_cache is None:
+                    # Create tool cache for the MCP manager if it doesn't have one
+                    self.mcp_manager.tool_cache = MCPToolCache(
+                        cache_duration=300,  # 5 minutes
+                        max_cache_size=100,
+                        persist_cache=True
+                    )
+                    log_technical("info", "Created tool cache for EnhancedMCPServerManager")
+                
+                # Get the tool cache reference
+                tool_cache = self.mcp_manager.tool_cache
+                
+                # Create and set MCP context builder for IntelligentAgent
+                context_builder = AgentContextBuilder(tool_cache)
+                
+                # Set MCP context builder and related components in IntelligentAgent
+                self._intelligent_agent.mcp_context_builder = context_builder
+                self._intelligent_agent.tool_cache = tool_cache
+                self._intelligent_agent.mcp_manager = self.mcp_manager  # Store reference to MCP manager
+                
+                log_technical("info", "Enhanced MCP context builder initialized for IntelligentAgent")
+                log_technical("info", f"MCP manager class: {type(self.mcp_manager).__name__}")
+                log_technical("info", f"Tool cache class: {type(tool_cache).__name__}")
+                
+            except ImportError as e:
+                log_technical("warning", f"Enhanced MCP context builder not available: {e}")
+            except Exception as e:
+                log_technical("warning", f"Error initializing enhanced MCP context builder: {e}")
+                import traceback
+                log_technical("debug", f"Full traceback: {traceback.format_exc()}")
+            
+            log_technical("info", "IntelligentAgent created and initialized with enhanced MCP support")
+        
+        return self._intelligent_agent
 
 def create_agent(
     name: Optional[str] = None,

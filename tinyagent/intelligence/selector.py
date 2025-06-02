@@ -90,11 +90,13 @@ class ToolSelector:
             selection_agent: Optional specialized selection agent
         """
         self.available_tools = available_tools
-        self.selection_agent = selection_agent or self._create_default_selection_agent()
         
-        # Initialize tool metadata
+        # Initialize tool metadata first
         self.tool_metadata: Dict[str, ToolMetadata] = {}
         self._initialize_tool_metadata()
+        
+        # Then create selection agent (which uses tool_metadata)
+        self.selection_agent = selection_agent or self._create_default_selection_agent()
         
         # Performance tracking
         self.tool_performance: Dict[str, Dict[str, Any]] = {}
@@ -313,6 +315,25 @@ Output your analysis in structured format with tool names, confidence scores, an
         except Exception as e:
             logger.error(f"Tool selection failed: {e}")
             return self._create_fallback_selection(task_step_description)
+    
+    async def select_tools_for_task(self, 
+                                  task_description: str, 
+                                  available_tools: List[Dict[str, Any]], 
+                                  task_context: Optional[Any] = None) -> ToolSelection:
+        """
+        Select tools for a task (alias for select_best_tool for compatibility)
+        
+        Args:
+            task_description: Description of the task
+            available_tools: List of available tools (for compatibility)
+            task_context: Optional task context (for compatibility)
+            
+        Returns:
+            ToolSelection with selected tools and reasoning
+        """
+        # For now, ignore available_tools and task_context and delegate to select_best_tool
+        # TODO: Integrate available_tools and task_context into selection process
+        return await self.select_best_tool(task_description)
     
     def _rule_based_selection(self, task_description: str) -> List[str]:
         """Simple rule-based tool selection"""

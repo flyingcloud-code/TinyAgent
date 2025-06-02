@@ -78,4 +78,44 @@ client:
   timeout: 30
   max_retries: 3
   tool_cache_duration: 300
-  max_tools_per_server: 50 
+  max_tools_per_server: 50
+
+# Enhanced Caching Configuration (EPIC-002)
+caching:
+  enabled: true
+  cache_duration: 300  # 5分钟缓存持续时间
+  max_cache_size: 100  # 最大缓存工具数
+  performance_tracking: true
+  persistent_cache: true
+  cache_compression: false
+  cache_cleanup_interval: 900  # 15分钟清理间隔
+  
+# Connection Pool Configuration (EPIC-002)
+connection_pool:
+  enabled: true
+  max_connections_per_server: 3
+  connection_timeout: 30
+  retry_attempts: 3
+  retry_delay: 1.0
+  idle_timeout: 300  # 5分钟空闲超时
+  health_check_interval: 60  # 1分钟健康检查间隔
+  max_error_count: 5
+  
+# Performance Optimization Settings (EPIC-002)
+performance:
+  auto_discovery: true
+  context_integration: true
+  performance_monitoring: true
+  benchmark_mode: false  # 启用性能基准测试模式
+  metrics_collection: true
+  async_tool_calls: true
+  parallel_discovery: true
+  
+# Tool Context Integration (EPIC-002)
+tools:
+  context_builder:
+    enabled: true
+    max_context_length: 4000
+    capability_mapping: true
+    performance_weighting: true
+    dynamic_recommendations: true 

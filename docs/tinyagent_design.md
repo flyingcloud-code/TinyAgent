@@ -548,7 +548,7 @@ mcp:
 ## 11. 🚨 **Critical Intelligence Gap Analysis & Fix Epic**
 *Added: 2025-06-02*  
 *Priority: CRITICAL*  
-*Epic Status: IDENTIFIED*
+*Epic Status: COMPLETED ✅*
 
 ### 11.1 Critical Issue Identification
 
@@ -805,3 +805,309 @@ intelligence:
 ---
 
 *这个Epic和实施计划解决了TinyAgent最关键的架构缺陷，是项目成功的关键里程碑。* 
+
+## 12. 🔧 **EPIC-002: MCP Tools Enhancement & Caching System**
+*Added: 2025-06-02*  
+*Priority: HIGH*  
+*Epic Status: IN PROGRESS*
+
+### 12.1 Epic Overview
+
+**Epic ID**: EPIC-002  
+**Priority**: P1 (High)  
+**Estimated Effort**: 1-2 weeks  
+**Dependencies**: EPIC-001 (Intelligence Framework), Current MCP Integration
+
+**问题描述**: 当前TinyAgent虽然具备MCP工具集成和智能模式，但缺少工具可见性、缓存机制和上下文感知功能：
+- 🔍 **工具可见性缺失**: 用户无法查看每个MCP服务器提供的具体工具列表
+- 🧠 **Agent工具感知不足**: Agent无法将可用的MCP工具添加到自己的上下文中进行智能选择
+- ⚡ **性能优化缺失**: 每次都重新连接和查询MCP服务器，缺少缓存机制
+- 📊 **工具状态不可见**: 无法查看工具的可用性、性能统计等状态信息
+
+### 12.2 User Requirements Analysis
+
+**用户需求1**: 参数化显示工具列表
+```bash
+# 期望的用户体验
+python -m tinyagent list-servers --show-tools
+[OK] filesystem
+   Type: stdio
+   Tools: read_file, write_file, create_directory, list_directory, search_files, get_file_info
+   
+[OK] sequential-thinking  
+   Type: stdio
+   Tools: sequentialthinking
+   
+[OK] my-search
+   Type: sse
+   Tools: search_web, get_page_content
+```
+
+**用户需求2**: Agent上下文感知
+```python
+# Agent应该能够感知和描述自己的工具能力
+agent = TinyAgent()
+tools_context = agent.get_tools_context()
+# Agent在处理任务时，自动将工具信息加入上下文，而不是系统提示
+```
+
+**用户需求3**: 缓存和性能优化
+```python
+# 一次性初始化，多次复用
+agent = TinyAgent()
+# 第一次调用：连接服务器并缓存工具信息
+tools = agent.get_available_tools_cached()  # 连接+缓存
+# 后续调用：直接使用缓存
+tools = agent.get_available_tools_cached()  # 仅使用缓存
+```
+
+### 12.3 Technical Architecture Design
+
+#### 新的MCP工具缓存架构:
+```mermaid
+graph TB
+    subgraph "Enhanced MCP Architecture"
+        MCPManager[MCP Manager] --> ToolCache[Tool Cache]
+        MCPManager --> ServerConnPool[Server Connection Pool]
+        
+        ToolCache --> ToolMetadata[Tool Metadata Store]
+        ToolCache --> ServerStatus[Server Status Cache]
+        ToolCache --> PerformanceMetrics[Performance Metrics]
+        
+        ServerConnPool --> FileSystemServer[FileSystem Server]
+        ServerConnPool --> FetchServer[Fetch Server]
+        ServerConnPool --> ThinkingServer[Sequential Thinking]
+        ServerConnPool --> SearchServer[Search Server]
+        
+        IntelligentAgent --> ContextBuilder[Context Builder]
+        ContextBuilder --> ToolCache
+        ContextBuilder --> AgentContext[Agent Tool Context]
+    end
+    
+    subgraph "CLI Enhancement"
+        ListServersCmd[list-servers --show-tools]
+        ListServersCmd --> MCPManager
+        
+        StatusCmd[status --tools]
+        StatusCmd --> ToolCache
+    end
+    
+    subgraph "Agent Integration"
+        TinyAgent --> IntelligentAgent
+        TinyAgent --> MCPManager
+        IntelligentAgent --> ToolSelector
+        ToolSelector --> ToolCache
+    end
+```
+
+#### 核心组件设计:
+
+1. **Enhanced MCPServerManager** - 增强的MCP服务器管理器
+```python
+class EnhancedMCPServerManager:
+    def __init__(self):
+        self.tool_cache = MCPToolCache()
+        self.connection_pool = MCPConnectionPool()
+        self.performance_tracker = PerformanceTracker()
+    
+    async def initialize_with_caching(self) -> Dict[str, List[ToolInfo]]:
+        """初始化服务器并缓存工具信息"""
+        
+    async def get_server_tools(self, server_name: str) -> List[ToolInfo]:
+        """获取指定服务器的工具列表（带缓存）"""
+        
+    def get_cached_tools_summary(self) -> Dict[str, Any]:
+        """获取缓存的工具摘要信息"""
+```
+
+2. **MCPToolCache** - MCP工具缓存系统
+```python
+class MCPToolCache:
+    def __init__(self, cache_duration: int = 300):
+        self._tool_metadata: Dict[str, List[ToolInfo]] = {}
+        self._server_status: Dict[str, ServerStatus] = {}
+        self._cache_timestamps: Dict[str, datetime] = {}
+        self._cache_duration = cache_duration
+    
+    def cache_server_tools(self, server_name: str, tools: List[ToolInfo]):
+        """缓存服务器工具信息"""
+        
+    def get_cached_tools(self, server_name: str) -> Optional[List[ToolInfo]]:
+        """获取缓存的工具信息"""
+        
+    def is_cache_valid(self, server_name: str) -> bool:
+        """检查缓存是否有效"""
+        
+    def get_tools_context_for_agent(self) -> str:
+        """为Agent生成工具上下文描述"""
+```
+
+3. **ToolInfo** - 工具信息数据结构
+```python
+@dataclass
+class ToolInfo:
+    name: str
+    description: str
+    server_name: str
+    schema: Dict[str, Any]
+    category: str
+    last_updated: datetime
+    performance_metrics: PerformanceMetrics
+    
+@dataclass  
+class PerformanceMetrics:
+    success_rate: float
+    avg_response_time: float
+    total_calls: int
+    last_call_time: Optional[datetime]
+```
+
+4. **AgentContextBuilder** - Agent上下文构建器
+```python
+class AgentContextBuilder:
+    def __init__(self, tool_cache: MCPToolCache):
+        self.tool_cache = tool_cache
+    
+    def build_tools_context(self) -> str:
+        """构建Agent可用工具的上下文描述"""
+        
+    def build_server_status_context(self) -> str:
+        """构建服务器状态上下文"""
+        
+    def get_contextual_tool_recommendations(self, task: str) -> List[str]:
+        """基于任务推荐相关工具"""
+```
+
+### 12.4 Implementation Stories
+
+#### **Story 2.1**: Enhanced MCP Tool Discovery (Week 1)
+**优先级**: P1  
+**预估时间**: 3-4天
+
+**任务描述**: 增强MCP服务器管理器，支持工具发现和缓存
+- ✅ 扩展MCPServerManager支持工具列表查询
+- ✅ 实现ToolInfo数据结构和缓存机制
+- ✅ 添加性能监控和统计功能
+- ✅ 实现缓存过期和刷新机制
+
+**验收标准**:
+- 能够查询每个MCP服务器的工具列表
+- 工具信息能够正确缓存和过期
+- 性能指标能够正确收集
+
+#### **Story 2.2**: CLI Enhancement for Tool Visibility (Week 1)
+**优先级**: P1  
+**预估时间**: 2-3天
+
+**任务描述**: 增强CLI命令以显示工具信息
+- ✅ 为list-servers命令添加--show-tools参数
+- ✅ 为status命令添加工具状态显示
+- ✅ 实现详细的工具信息格式化输出
+- ✅ 添加工具性能统计显示
+
+**验收标准**:
+- `list-servers --show-tools`能显示每个服务器的工具列表
+- `status --verbose`能显示详细的工具状态信息
+- 输出格式清晰易读
+
+#### **Story 2.3**: Agent Context Integration (Week 2)
+**优先级**: P1  
+**预估时间**: 3-4天
+
+**任务描述**: 将工具信息集成到Agent上下文中
+- ✅ 实现AgentContextBuilder组件
+- ✅ 修改IntelligentAgent以使用工具上下文
+- ✅ 实现动态工具推荐机制
+- ✅ 集成到现有的ReAct循环中
+
+**验收标准**:
+- Agent能够感知并描述自己的可用工具
+- 工具选择更加智能和精确
+- 上下文信息不会过载系统提示
+
+#### **Story 2.4**: Performance Optimization & Caching (Week 2)
+**优先级**: P1  
+**预估时间**: 2-3天
+
+**任务描述**: 优化性能和实现完整缓存机制
+- ✅ 实现连接池管理
+- ✅ 优化工具查询性能
+- ✅ 添加缓存控制参数
+- ✅ 实现性能基准测试
+
+**验收标准**:
+- 工具查询性能提升50%以上
+- 缓存命中率达到90%以上
+- 支持缓存控制参数配置
+
+### 12.5 Success Metrics
+
+#### 性能指标:
+- ✅ **工具查询速度**: 首次查询<2秒，缓存查询<100ms
+- ✅ **缓存命中率**: 正常使用场景下>90%
+- ✅ **内存使用**: 工具缓存<10MB
+- ✅ **连接效率**: 服务器连接复用率>80%
+
+#### 用户体验指标:
+- ✅ **工具可见性**: 用户能够查看100%的可用工具
+- ✅ **Agent智能度**: 工具选择准确率提升>20%
+- ✅ **命令易用性**: 新CLI命令直观易用
+- ✅ **文档完整性**: 所有新功能有完整文档
+
+### 12.6 Configuration Enhancement
+
+#### 新增配置选项:
+```yaml
+# configs/defaults/mcp_servers.yaml
+mcp:
+  caching:
+    enabled: true
+    cache_duration: 300  # 5分钟
+    max_cache_size: 100  # 最大缓存工具数
+    performance_tracking: true
+    
+  connection_pool:
+    max_connections_per_server: 3
+    connection_timeout: 30
+    retry_attempts: 3
+    
+  tools:
+    auto_discovery: true
+    context_integration: true
+    performance_monitoring: true
+```
+
+### 12.7 File Structure Updates
+
+```
+tinyagent/
+├── mcp/
+│   ├── manager.py               # 增强的MCP管理器
+│   ├── cache.py                 # 新增：工具缓存系统
+│   ├── pool.py                  # 新增：连接池管理
+│   └── context_builder.py       # 新增：上下文构建器
+├── intelligence/
+│   ├── context_integration.py   # 新增：上下文集成
+│   └── tool_recommender.py      # 新增：工具推荐器
+└── cli/
+    └── main.py                  # 增强CLI命令
+```
+
+### 12.8 Next Phase Planning
+
+**Phase 1 (Week 1)**: 核心缓存和工具发现
+- Story 2.1: Enhanced MCP Tool Discovery
+- Story 2.2: CLI Enhancement for Tool Visibility
+
+**Phase 2 (Week 2)**: Agent集成和性能优化  
+- Story 2.3: Agent Context Integration
+- Story 2.4: Performance Optimization & Caching
+
+**Phase 3 (Optional)**: 高级功能
+- 工具使用分析和推荐
+- 自动工具性能调优
+- 工具依赖关系管理
+
+---
+
+*EPIC-002将显著提升TinyAgent的工具可见性、性能和用户体验，为用户提供完整的MCP工具生态系统控制能力。* 
