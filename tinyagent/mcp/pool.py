@@ -396,6 +396,10 @@ class MCPConnectionPool:
         
         return stats
     
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """Get performance statistics (alias for get_pool_stats)"""
+        return self.get_pool_stats()
+    
     async def invalidate_server_connections(self, server_name: str):
         """Invalidate all connections for a specific server"""
         if server_name in self._pools:

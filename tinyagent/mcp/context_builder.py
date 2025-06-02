@@ -338,4 +338,21 @@ class AgentContextBuilder:
     def update_tool_performance_context(self, tool_name: str, success: bool, response_time: float) -> None:
         """Update tool performance and refresh recommendations"""
         self.tool_cache.update_tool_performance(tool_name, success, response_time)
-        self.logger.debug(f"Updated performance context for {tool_name}: success={success}") 
+        self.logger.debug(f"Updated performance context for {tool_name}: success={success}")
+
+    def build_tools_context(self, task_hint: Optional[str] = None) -> str:
+        """
+        Build tools context for agent (returns context text only for compatibility)
+        
+        Args:
+            task_hint: Optional hint about the task type for tool recommendation
+            
+        Returns:
+            String containing tools context information
+        """
+        try:
+            tool_context = self.build_tool_context(task_hint)
+            return tool_context.context_text
+        except Exception as e:
+            self.logger.error(f"Error building tools context: {e}")
+            return "Tools are currently unavailable. Operating in basic mode." 

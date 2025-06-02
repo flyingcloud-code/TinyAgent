@@ -56,16 +56,18 @@ class IntelligentAgent:
     - AgentContextBuilder: MCP tool context integration (NEW)
     """
     
-    def __init__(self, llm_agent=None, config: Optional[IntelligentAgentConfig] = None):
+    def __init__(self, llm_agent=None, config: Optional[IntelligentAgentConfig] = None, tinyagent_config=None):
         """
         Initialize IntelligentAgent with all intelligence components
         
         Args:
             llm_agent: Base LLM agent for reasoning
             config: Configuration for intelligent behavior
+            tinyagent_config: TinyAgent configuration for LLM settings
         """
         self.config = config or IntelligentAgentConfig()
         self.llm_agent = llm_agent
+        self.tinyagent_config = tinyagent_config  # Store TinyAgent config for ToolSelector
         
         # Initialize MCP context builder if available
         self.mcp_context_builder = None
@@ -94,7 +96,8 @@ class IntelligentAgent:
         )
         
         self.tool_selector = ToolSelector(
-            available_tools={}  # Will be populated when MCP tools are registered
+            available_tools={},  # Will be populated when MCP tools are registered
+            config=tinyagent_config  # Pass TinyAgent config for LLM settings
         )
         
         self.reasoning_engine = ReasoningEngine(

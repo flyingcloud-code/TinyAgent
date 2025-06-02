@@ -1027,28 +1027,53 @@ class TinyAgent:
                 if hasattr(self.mcp_manager, 'initialize_with_caching'):
                     log_technical("info", "Using EnhancedMCPServerManager for tool registration")
                     
-                    # Initialize with caching to populate tool cache
-                    cached_tools = await self.mcp_manager.initialize_with_caching()
+                    # Check if tools are already cached to avoid redundant initialization
+                    cached_tools = None
+                    if hasattr(self.mcp_manager, 'tool_cache') and self.mcp_manager.tool_cache:
+                        # Try to get from cache first
+                        cache_stats = self.mcp_manager.tool_cache.get_cache_stats()
+                        if cache_stats.get('valid_caches', 0) > 0:
+                            log_technical("info", f"Using cached tools: {cache_stats['total_tools_cached']} tools from {cache_stats['total_servers_cached']} servers")
+                            # Use cached tools directly
+                            cached_tools = {}
+                            for server_name in self.config.mcp.servers.keys():
+                                cached_server_tools = self.mcp_manager.tool_cache.get_cached_tools(server_name)
+                                if cached_server_tools:
+                                    cached_tools[server_name] = cached_server_tools
+                    
+                    # If no valid cache, initialize with caching (but limit logging)
+                    if not cached_tools:
+                        log_technical("info", "No valid cache found, initializing MCP servers...")
+                        # Temporarily suppress repetitive tool discovery logs
+                        filesystem_logger = logging.getLogger('agents.mcp')
+                        old_level = filesystem_logger.level
+                        filesystem_logger.setLevel(logging.WARNING)  # Suppress INFO/DEBUG messages
+                        
+                        try:
+                            cached_tools = await self.mcp_manager.initialize_with_caching()
+                        finally:
+                            filesystem_logger.setLevel(old_level)  # Restore original level
                     
                     # Get all tools from cache
                     all_tools = []
                     total_servers = 0
-                    for server_name, tool_list in cached_tools.items():
-                        if tool_list:
-                            total_servers += 1
-                            # Convert ToolInfo objects to dictionary format for intelligent agent
-                            for tool_info in tool_list:
-                                tool_dict = {
-                                    'name': tool_info.name,
-                                    'description': tool_info.description,
-                                    'server': tool_info.server_name,
-                                    'category': tool_info.category,
-                                    'performance_metrics': tool_info.performance_metrics.__dict__ if tool_info.performance_metrics else {},
-                                    'last_updated': tool_info.last_updated.isoformat() if tool_info.last_updated else None,
-                                    'schema': tool_info.schema,
-                                    'function': None  # Will be handled by MCP execution
-                                }
-                                all_tools.append(tool_dict)
+                    if cached_tools:
+                        for server_name, tool_list in cached_tools.items():
+                            if tool_list:
+                                total_servers += 1
+                                # Convert ToolInfo objects to dictionary format for intelligent agent
+                                for tool_info in tool_list:
+                                    tool_dict = {
+                                        'name': tool_info.name,
+                                        'description': tool_info.description,
+                                        'server': tool_info.server_name,
+                                        'category': tool_info.category,
+                                        'performance_metrics': tool_info.performance_metrics.__dict__ if tool_info.performance_metrics else {},
+                                        'last_updated': tool_info.last_updated.isoformat() if tool_info.last_updated else None,
+                                        'schema': tool_info.schema,
+                                        'function': None  # Will be handled by MCP execution
+                                    }
+                                    all_tools.append(tool_dict)
                     
                     # Register tools with intelligent agent
                     if all_tools:
@@ -1056,8 +1081,11 @@ class TinyAgent:
                         log_technical("info", f"Enhanced registration: {len(all_tools)} tools from {total_servers} servers")
                         log_agent(f"Registered {len(all_tools)} MCP tools with enhanced context")
                         
-                        # Build enhanced tool context using context builder
-                        if hasattr(intelligent_agent, 'mcp_context_builder') and intelligent_agent.mcp_context_builder:
+                        # Build enhanced tool context using context builder (only if not already built)
+                        if (hasattr(intelligent_agent, 'mcp_context_builder') and 
+                            intelligent_agent.mcp_context_builder and 
+                            not getattr(intelligent_agent, '_tool_context_cache_valid', False)):
+                            
                             try:
                                 # Build comprehensive tool context
                                 tool_context = intelligent_agent.mcp_context_builder.build_tool_context()
@@ -1069,38 +1097,17 @@ class TinyAgent:
                                     intelligent_agent._current_tool_context = tool_context
                                     intelligent_agent._tool_context_cache_valid = True
                                     
-                                    # Log context summary
-                                    log_technical("info", f"Tool context servers: {list(tool_context.server_status.keys())}")
-                                    log_technical("info", f"Tool capabilities: {list(tool_context.capabilities_summary.keys())}")
-                                    
-                                    # Log performance summary if available
-                                    if tool_context.performance_summary:
-                                        perf_summary = tool_context.performance_summary
-                                        log_technical("info", f"Performance metrics: {perf_summary.get('overview', {})}")
-                                    
-                                    # Log recommendations
-                                    if tool_context.recommended_tools:
-                                        for category, tools in tool_context.recommended_tools.items():
-                                            if tools:
-                                                log_technical("debug", f"Recommended {category}: {tools}")
+                                    # Log context summary (limited)
+                                    log_technical("debug", f"Tool context servers: {list(tool_context.server_status.keys())}")
+                                    log_technical("debug", f"Tool capabilities: {list(tool_context.capabilities_summary.keys())}")
                                 
                                 else:
                                     log_technical("warning", "Tool context built but no tools available")
                                 
                             except Exception as context_error:
                                 log_technical("warning", f"Error building enhanced tool context: {context_error}")
-                                import traceback
-                                log_technical("debug", f"Context build traceback: {traceback.format_exc()}")
-                        
-                        # Verify enhanced tool cache is properly linked
-                        if hasattr(intelligent_agent, 'tool_cache') and intelligent_agent.tool_cache:
-                            cache_stats = intelligent_agent.tool_cache.get_cache_stats()
-                            log_technical("info", f"Enhanced tool cache stats: {cache_stats}")
-                        
-                        # Get enhanced performance summary
-                        if hasattr(self.mcp_manager, 'get_enhanced_performance_summary'):
-                            enhanced_perf = self.mcp_manager.get_enhanced_performance_summary()
-                            log_technical("debug", f"Enhanced MCP manager performance: {enhanced_perf}")
+                        else:
+                            log_technical("debug", "Tool context already built or context builder not available")
                         
                     else:
                         log_technical("info", "No enhanced tools available to register")
@@ -1117,8 +1124,11 @@ class TinyAgent:
                 
         except Exception as e:
             log_technical("error", f"Error in enhanced MCP tool registration: {e}")
-            import traceback
-            log_technical("debug", f"Enhanced registration traceback: {traceback.format_exc()}")
+            # Don't log full traceback unless in debug mode
+            if logger.level <= logging.DEBUG:
+                import traceback
+                log_technical("debug", f"Enhanced registration traceback: {traceback.format_exc()}")
+            
             # Fallback to basic registration
             log_technical("info", "Falling back to basic tool registration")
             try:
@@ -1220,8 +1230,40 @@ class TinyAgent:
             Agent instance without MCP tools
         """
         try:
+            # Get API key from environment
+            api_key = os.getenv(self.config.llm.api_key_env)
+            if not api_key:
+                raise ValueError(f"API key not found in environment variable: {self.config.llm.api_key_env}")
+            
             # Create model instance
             model_instance = self._create_model_instance(self.model_name)
+            
+            # Set up custom OpenAI client if base_url is configured (for OpenRouter, etc.)
+            # Note: For LiteLLM models, base_url is handled by LitellmModel itself
+            if self.config.llm.base_url and not self._should_use_litellm(self.model_name):
+                # Clear any conflicting environment variable that might override our configuration
+                original_base_url = os.environ.get('OPENAI_BASE_URL')
+                if original_base_url and original_base_url != self.config.llm.base_url:
+                    log_technical("warning", f"Environment OPENAI_BASE_URL ({original_base_url}) conflicts with config base_url ({self.config.llm.base_url}), using config")
+                    # Temporarily clear the environment variable
+                    os.environ.pop('OPENAI_BASE_URL', None)
+                
+                try:
+                    custom_client = AsyncOpenAI(
+                        api_key=api_key,
+                        base_url=self.config.llm.base_url
+                    )
+                    set_default_openai_client(custom_client)
+                    
+                    # Add to global cleanup list
+                    global _openai_clients
+                    _openai_clients.append(custom_client)
+                    
+                    log_technical("info", f"Simple agent using custom OpenAI client with base_url: {self.config.llm.base_url}")
+                finally:
+                    # Restore the original environment variable if it existed
+                    if original_base_url:
+                        os.environ['OPENAI_BASE_URL'] = original_base_url
             
             # Create agent without MCP servers
             agent_kwargs = {
@@ -1236,7 +1278,12 @@ class TinyAgent:
                 from agents import ModelSettings
                 agent_kwargs["model_settings"] = ModelSettings(temperature=self.config.llm.temperature)
             
-            return Agent(**agent_kwargs)
+            agent = Agent(**agent_kwargs)
+            
+            model_type = "LiteLLM" if self._should_use_litellm(self.model_name) else "OpenAI"
+            log_technical("info", f"Created simple agent with {model_type} model '{self.model_name}' (no MCP servers)")
+            
+            return agent
             
         except Exception as e:
             log_technical("error", f"Failed to create simple agent: {e}")
@@ -1914,7 +1961,8 @@ class TinyAgent:
             # Create IntelligentAgent
             self._intelligent_agent = IntelligentAgent(
                 llm_agent=base_agent,
-                config=intelligent_config
+                config=intelligent_config,
+                tinyagent_config=self.config  # Pass TinyAgent config for LLM settings
             )
             
             # Initialize Enhanced MCP context builder if available

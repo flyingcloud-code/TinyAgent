@@ -10,6 +10,7 @@ from enum import Enum
 import re
 
 from agents import Agent, Runner
+from ..core.config import get_config, TinyAgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -81,15 +82,18 @@ class ToolSelector:
     
     def __init__(self, 
                  available_tools: Dict[str, Any],
-                 selection_agent: Optional[Agent] = None):
+                 selection_agent: Optional[Agent] = None,
+                 config: Optional[TinyAgentConfig] = None):
         """
         Initialize ToolSelector
         
         Args:
             available_tools: Dictionary of available tools
             selection_agent: Optional specialized selection agent
+            config: Optional TinyAgent configuration for LLM settings
         """
         self.available_tools = available_tools
+        self.config = config or get_config()
         
         # Initialize tool metadata first
         self.tool_metadata: Dict[str, ToolMetadata] = {}
@@ -104,12 +108,29 @@ class ToolSelector:
         logger.info(f"ToolSelector initialized with {len(available_tools)} tools")
     
     def _create_default_selection_agent(self) -> Agent:
-        """Create default tool selection agent"""
-        return Agent(
-            name="ToolSelectionAgent",
-            instructions=self._get_selection_instructions(),
-            model="gpt-4o-mini"  # Fast model for selection
-        )
+        """Create default tool selection agent using configuration"""
+        try:
+            # Temporarily disable LLM-based tool selection to avoid LiteLLM configuration complexity
+            # Focus on rule-based selection for now
+            logger.info("LLM-based tool selection disabled, using rule-based selection only")
+            return None
+            
+            # TODO: Re-enable when LiteLLM integration is properly configured
+            # Get model from configuration instead of hardcoding
+            model_name = self.config.llm.model
+            
+            # Log the model being used for tool selection
+            logger.debug(f"Creating tool selection agent with model: {model_name}")
+            
+            return Agent(
+                name="ToolSelectionAgent",
+                instructions=self._get_selection_instructions(),
+                model=model_name
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create selection agent with configured model ({getattr(self.config.llm, 'model', 'unknown')}): {e}")
+            # Create a simple fallback agent that doesn't require LLM
+            return None
     
     def _get_selection_instructions(self) -> str:
         """Get tool selection instructions for the agent"""
@@ -374,6 +395,24 @@ Output your analysis in structured format with tool names, confidence scores, an
     async def _llm_based_selection(self, task_description: str) -> ToolSelection:
         """Use LLM for intelligent tool selection"""
         try:
+            # Check if selection agent is available
+            if not self.selection_agent:
+                logger.debug("Selection agent not available, falling back to rule-based selection")
+                selected_tools = self._rule_based_selection(task_description)
+                confidence_scores = {tool: 0.7 for tool in selected_tools}  # Default confidence
+                
+                return ToolSelection(
+                    selected_tools=selected_tools[:3],  # Limit to top 3
+                    confidence_scores=confidence_scores,
+                    reasoning="Rule-based selection (LLM unavailable)",
+                    alternative_tools=[],
+                    estimated_execution_time=sum(
+                        self.tool_metadata.get(tool, ToolMetadata("", "", [], [], [], 3.0, 0.5, 3.0)).average_execution_time
+                        for tool in selected_tools[:3]
+                    ),
+                    complexity_assessment="moderate"
+                )
+            
             selection_prompt = self._create_selection_prompt(task_description)
             
             result = await Runner.run(
@@ -686,4 +725,86 @@ Provide your selection with reasoning."""
         
         # Sort by score and return top alternatives
         alternatives.sort(key=lambda x: x[1], reverse=True)
-        return alternatives[:5] 
+        return alternatives[:5]
+
+    def add_tool_capability(self, 
+                           tool_name: str, 
+                           capabilities: List[str],
+                           server_name: str = "unknown",
+                           reliability_score: float = 0.8,
+                           complexity_score: float = 5.0,
+                           description: str = None) -> None:
+        """
+        Add a new tool capability to the tool selector
+        
+        Args:
+            tool_name: Name of the tool
+            capabilities: List of capability descriptions
+            server_name: Name of the server providing the tool
+            reliability_score: Reliability score (0-1)
+            complexity_score: Complexity score (1-10)
+            description: Optional description of the tool
+        """
+        # Convert string capabilities to ToolCapability enums
+        tool_capabilities = []
+        for cap in capabilities:
+            cap_lower = cap.lower()
+            if any(keyword in cap_lower for keyword in ['file', 'read', 'write', 'directory']):
+                tool_capabilities.append(ToolCapability.FILE_OPERATIONS)
+            elif any(keyword in cap_lower for keyword in ['search', 'google', 'find', 'query']):
+                tool_capabilities.append(ToolCapability.WEB_SEARCH)
+            elif any(keyword in cap_lower for keyword in ['web', 'url', 'fetch', 'download']):
+                tool_capabilities.append(ToolCapability.WEB_CONTENT)
+            elif any(keyword in cap_lower for keyword in ['think', 'reason', 'analyze', 'sequential']):
+                tool_capabilities.append(ToolCapability.REASONING)
+            elif any(keyword in cap_lower for keyword in ['weather', 'temperature', 'climate']):
+                tool_capabilities.append(ToolCapability.WEATHER)
+            elif any(keyword in cap_lower for keyword in ['text', 'process', 'language']):
+                tool_capabilities.append(ToolCapability.TEXT_PROCESSING)
+            elif any(keyword in cap_lower for keyword in ['data', 'analysis', 'statistics']):
+                tool_capabilities.append(ToolCapability.DATA_ANALYSIS)
+            elif any(keyword in cap_lower for keyword in ['communication', 'message', 'email']):
+                tool_capabilities.append(ToolCapability.COMMUNICATION)
+            elif any(keyword in cap_lower for keyword in ['system', 'admin', 'monitor']):
+                tool_capabilities.append(ToolCapability.SYSTEM)
+            else:
+                tool_capabilities.append(ToolCapability.UNKNOWN)
+        
+        # Remove duplicates
+        tool_capabilities = list(set(tool_capabilities))
+        
+        # Create tool description if not provided
+        if description is None:
+            description = f"Tool from {server_name}: {', '.join(capabilities)}"
+        
+        # Create ToolMetadata object
+        tool_metadata = ToolMetadata(
+            name=tool_name,
+            description=description,
+            capabilities=tool_capabilities,
+            input_types=["unknown"],  # Default input types
+            output_types=["unknown"],  # Default output types
+            complexity_score=complexity_score,
+            reliability_score=reliability_score,
+            average_execution_time=2.0  # Default execution time
+        )
+        
+        # Add to tool metadata and available tools
+        self.tool_metadata[tool_name] = tool_metadata
+        self.available_tools[tool_name] = {
+            'name': tool_name,
+            'description': description,
+            'server': server_name,
+            'capabilities': capabilities
+        }
+        
+        logger.info(f"Added tool capability: {tool_name} with capabilities {tool_capabilities}")
+
+    def get_selection_statistics(self) -> Dict[str, Any]:
+        """
+        Get selection statistics (alias for get_tool_statistics for compatibility)
+        
+        Returns:
+            Tool usage and selection statistics
+        """
+        return self.get_tool_statistics() 

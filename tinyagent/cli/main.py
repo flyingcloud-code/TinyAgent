@@ -17,7 +17,7 @@ from datetime import datetime
 
 from ..core.config import get_config, set_profile
 from ..core.agent import create_agent, AGENTS_AVAILABLE
-from ..mcp.manager import MCPServerManager
+from ..mcp.manager import EnhancedMCPServerManager, get_mcp_manager
 from ..core.logging import setup_logging, log_user, log_agent, log_technical
 
 # Enhanced logging will be set up by individual commands
@@ -145,8 +145,7 @@ def status(verbose: bool, profile: Optional[str], tools: bool):
         if not config.mcp.enabled:
             click.echo("  MCP is disabled")
         else:
-            from ..mcp.manager import MCPServerManager
-            mcp_manager = MCPServerManager(list(config.mcp.servers.values()))
+            mcp_manager = get_mcp_manager()
             
             if tools:
                 # Show detailed tools status with caching information
@@ -310,9 +309,12 @@ def list_servers(show_tools: bool, verbose: bool):
             click.echo("No MCP servers configured")
             return
         
-        # Create enhanced MCP manager with caching
-        from ..mcp.manager import MCPServerManager
-        mcp_manager = MCPServerManager(list(config.mcp.servers.values()))
+        # Create enhanced MCP manager with caching - use the factory function
+        try:
+            mcp_manager = get_mcp_manager()
+        except Exception as e:
+            click.echo(f"❌ Error creating MCP manager: {e}")
+            return
         
         if show_tools:
             # Initialize servers and cache tools for detailed display
@@ -329,17 +331,27 @@ def list_servers(show_tools: bool, verbose: bool):
                     return
                 
                 # Display each server with its tools
+                total_tools = 0
                 for server_name, tools in server_tools.items():
                     server_config = config.mcp.servers[server_name]
                     status = "OK" if tools else "NO_TOOLS"
+                    
+                    # Deduplicate tools by name to fix duplicate display issue
+                    unique_tools = {}
+                    for tool in tools:
+                        if tool.name not in unique_tools:
+                            unique_tools[tool.name] = tool
+                    
+                    deduped_tools = list(unique_tools.values())
+                    total_tools += len(deduped_tools)
                     
                     click.echo(f"[{status}] {server_name}")
                     click.echo(f"   Type: {server_config.type}")
                     click.echo(f"   Description: {server_config.description}")
                     
-                    if tools:
-                        click.echo(f"   Tools ({len(tools)}):")
-                        for tool in tools:
+                    if deduped_tools:
+                        click.echo(f"   Tools ({len(deduped_tools)}):")
+                        for tool in deduped_tools:
                             click.echo(f"     • {tool.name}")
                             if verbose:
                                 click.echo(f"       Description: {tool.description}")
@@ -356,9 +368,7 @@ def list_servers(show_tools: bool, verbose: bool):
                 
                 # Show cache statistics
                 cache_stats = mcp_manager.get_cache_stats()
-                click.echo(f"📊 Cache Statistics:")
-                click.echo(f"   Cached servers: {cache_stats['total_servers_cached']}")
-                click.echo(f"   Total tools: {cache_stats['total_tools_cached']}")
+                click.echo(f"   Total tools: {total_tools}")
                 if cache_stats.get('cache_hits', 0) > 0 or cache_stats.get('cache_misses', 0) > 0:
                     hit_rate = cache_stats['cache_hits'] / (cache_stats['cache_hits'] + cache_stats['cache_misses']) * 100
                     click.echo(f"   Cache hit rate: {hit_rate:.1f}%")
@@ -374,7 +384,6 @@ def list_servers(show_tools: bool, verbose: bool):
         else:
             # Simple server list without tool discovery
             try:
-                mcp_manager.initialize_servers()
                 server_info = mcp_manager.get_server_info()
                 
                 for info in server_info:
@@ -566,7 +575,7 @@ def test_mcp(server: Optional[str]):
         click.echo("[TEST] Testing MCP Server Connections")
         click.echo("=" * 35)
         
-        mcp_manager = MCPServerManager(enabled_servers)
+        mcp_manager = get_mcp_manager()
         servers = mcp_manager.initialize_servers()
         
         click.echo(f"\n[OK] Successfully initialized {len(servers)} out of {len(enabled_servers)} servers")

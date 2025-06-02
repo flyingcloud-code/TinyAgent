@@ -737,9 +737,9 @@ def get_mcp_manager() -> EnhancedMCPServerManager:
     from ..core.config import get_config
     config = get_config()
     
-    # Filter enabled servers
+    # Filter enabled servers - config.mcp.servers is a Dict[str, MCPServerConfig]
     enabled_servers = [
-        server for server in config.mcp.servers 
+        server for server in config.mcp.servers.values()
         if server.enabled
     ]
     
