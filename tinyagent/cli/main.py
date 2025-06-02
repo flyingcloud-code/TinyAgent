@@ -583,6 +583,10 @@ def run_agent(task: str, **kwargs):
         else:
             response_text = str(result)
         
+        # Display the agent's response to the user
+        if response_text:
+            log_user(f"\n{response_text}")
+        
         log_agent("Task completed successfully")
         log_user("[OK] Task completed!")
         

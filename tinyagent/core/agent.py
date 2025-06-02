@@ -167,6 +167,46 @@ class MCPToolCallLogger:
         """Delegate all attributes to the original agent"""
         return getattr(self.original_agent, name)
     
+    def _infer_server_name(self, tool_name: str, event_item) -> str:
+        """Infer server name from tool name and event item attributes"""
+        # Method 1: Try to get server name from event item attributes
+        try:
+            if hasattr(event_item, 'server_name'):
+                return event_item.server_name
+            elif hasattr(event_item, 'mcp_server'):
+                return getattr(event_item.mcp_server, 'name', 'unknown')
+            elif hasattr(event_item, 'tool_call') and hasattr(event_item.tool_call, 'server'):
+                return event_item.tool_call.server
+        except Exception:
+            pass
+        
+        # Method 2: Infer from tool name patterns
+        tool_name_lower = tool_name.lower()
+        
+        # Filesystem patterns
+        if any(pattern in tool_name_lower for pattern in ['filesystem', 'file', 'read', 'write', 'create', 'delete', 'list']):
+            return "filesystem"
+        
+        # Search patterns  
+        elif any(pattern in tool_name_lower for pattern in ['search', 'google', 'web', 'fetch', 'get_web']):
+            return "my-search"
+        
+        # Sequential thinking patterns
+        elif any(pattern in tool_name_lower for pattern in ['thinking', 'sequential', 'think']):
+            return "sequential-thinking"
+        
+        # Fetch patterns
+        elif any(pattern in tool_name_lower for pattern in ['fetch', 'http', 'request', 'url']):
+            return "fetch"
+        
+        # Method 3: Check if server name is in our server mapping
+        if self.server_name_map:
+            for server_name in self.server_name_map.keys():
+                if server_name.lower() in tool_name_lower:
+                    return server_name
+        
+        return "unknown"
+    
     async def run(self, input_data, **kwargs):
         """Override run method to log tool calls with enhanced logging"""
         log_agent("Starting task execution...")
@@ -224,7 +264,7 @@ class MCPToolCallLogger:
         tool_call_sequence = 0
         current_tool_call_start = None
         current_tool_info = {}  # Store current tool call details
-        collected_responses = []  # Collect all agent responses
+        collected_responses = []
         
         async for event in result.stream_events():
             # Ignore raw response events
@@ -236,33 +276,80 @@ class MCPToolCallLogger:
                     tool_call_sequence += 1
                     current_tool_call_start = time.time()
                     
-                    # Extract tool details
+                    # Extract tool details with improved robustness
                     tool_name = "unknown"
                     server_name = "unknown"
                     tool_input = "N/A"
                     
                     try:
-                        # Try to extract tool name and input from the item
-                        if hasattr(event.item, 'tool_call'):
-                            tool_call = event.item.tool_call
-                            if hasattr(tool_call, 'function'):
-                                tool_name = tool_call.function.name
-                                if hasattr(tool_call.function, 'arguments'):
-                                    tool_input = tool_call.function.arguments
+                        # Log the raw item structure for debugging
+                        log_technical("info", f"Tool call item type: {type(event.item)}")
+                        log_technical("info", f"Tool call item attributes: {dir(event.item)}")
+                        
+                        # Method 1: Try to extract from raw_item (most likely to work)
+                        if hasattr(event.item, 'raw_item') and event.item.raw_item:
+                            raw_item = event.item.raw_item
+                            log_technical("info", f"Found raw_item: {type(raw_item)}")
+                            log_technical("info", f"Raw item attributes: {dir(raw_item)}")
+                            
+                            # Try to extract function name from raw_item
+                            if hasattr(raw_item, 'function') and raw_item.function:
+                                tool_name = raw_item.function.name or "unknown"
+                                if hasattr(raw_item.function, 'arguments') and raw_item.function.arguments:
+                                    tool_input = str(raw_item.function.arguments)
                                     # Truncate long inputs for logging
                                     if len(tool_input) > 200:
                                         tool_input = tool_input[:200] + "... (truncated)"
+                                log_technical("info", f"Extracted from raw_item.function.name: {tool_name}")
+                            elif hasattr(raw_item, 'name'):
+                                tool_name = raw_item.name or "unknown"
+                                log_technical("info", f"Extracted from raw_item.name: {tool_name}")
+                            elif hasattr(raw_item, 'tool_call') and raw_item.tool_call:
+                                tool_call = raw_item.tool_call
+                                if hasattr(tool_call, 'function') and tool_call.function:
+                                    tool_name = tool_call.function.name or "unknown"
+                                    log_technical("info", f"Extracted from raw_item.tool_call.function.name: {tool_name}")
+                        
+                        # Method 2: Try to extract from tool_call attribute (fallback)
+                        elif hasattr(event.item, 'tool_call') and event.item.tool_call:
+                            tool_call = event.item.tool_call
+                            log_technical("info", f"Found tool_call: {type(tool_call)}")
+                            
+                            if hasattr(tool_call, 'function') and tool_call.function:
+                                tool_name = tool_call.function.name or "unknown"
+                                if hasattr(tool_call.function, 'arguments') and tool_call.function.arguments:
+                                    tool_input = str(tool_call.function.arguments)
+                                    # Truncate long inputs for logging
+                                    if len(tool_input) > 200:
+                                        tool_input = tool_input[:200] + "... (truncated)"
+                            elif hasattr(tool_call, 'name'):
+                                tool_name = tool_call.name or "unknown"
+                            
+                        # Method 3: Try to extract from other possible attributes
+                        elif hasattr(event.item, 'function_name'):
+                            tool_name = event.item.function_name or "unknown"
+                        elif hasattr(event.item, 'name'):
+                            tool_name = event.item.name or "unknown"
+                        elif hasattr(event.item, 'tool_name'):
+                            tool_name = event.item.tool_name or "unknown"
+                        
+                        # Log what we found
+                        log_technical("info", f"Final extracted tool name: {tool_name}")
                         
                         # Try to infer server name from tool name or other attributes
-                        if 'filesystem' in tool_name.lower() or 'file' in tool_name.lower():
-                            server_name = "filesystem"
-                        elif 'search' in tool_name.lower() or 'google' in tool_name.lower():
-                            server_name = "my-search"
-                        elif 'thinking' in tool_name.lower() or 'sequential' in tool_name.lower():
-                            server_name = "sequential-thinking"
+                        server_name = self._infer_server_name(tool_name, event.item)
+                        log_technical("info", f"Inferred server name: {server_name}")
                         
                     except Exception as e:
-                        log_technical("debug", f"Error extracting tool details: {e}")
+                        log_technical("info", f"Error extracting tool details: {e}")
+                        # Try to get string representation for debugging
+                        try:
+                            item_str = str(event.item)
+                            if len(item_str) > 300:
+                                item_str = item_str[:300] + "..."
+                            log_technical("info", f"Tool call item string: {item_str}")
+                        except:
+                            log_technical("info", "Could not get string representation of tool call item")
                     
                     # Store current tool info for completion logging
                     current_tool_info = {
@@ -375,8 +462,67 @@ class MCPToolCallLogger:
                 elif event.item.type == "message_output_item":
                     # Message output - collect for final result
                     try:
-                        from agents import ItemHelpers
-                        message_text = ItemHelpers.text_message_output(event.item)
+                        # Try multiple methods to extract text from the message item
+                        message_text = None
+                        
+                        # Method 1: Try ItemHelpers first (most reliable)
+                        try:
+                            from agents import ItemHelpers
+                            message_text = ItemHelpers.text_message_output(event.item)
+                            if message_text and len(message_text.strip()) > 0:
+                                log_technical("debug", f"Successfully extracted text using ItemHelpers: {len(message_text)} chars")
+                        except ImportError:
+                            log_technical("debug", "ItemHelpers not available, trying manual extraction")
+                        except Exception as helper_error:
+                            log_technical("debug", f"ItemHelpers failed: {helper_error}, trying manual extraction")
+                        
+                        # Method 2: Manual extraction if ItemHelpers failed
+                        if not message_text:
+                            try:
+                                # Try to access content directly
+                                if hasattr(event.item, 'content') and event.item.content:
+                                    if isinstance(event.item.content, list):
+                                        # Content is a list of content parts
+                                        text_parts = []
+                                        for content_part in event.item.content:
+                                            if hasattr(content_part, 'text') and content_part.text:
+                                                text_parts.append(content_part.text)
+                                            elif hasattr(content_part, 'content') and content_part.content:
+                                                text_parts.append(str(content_part.content))
+                                        if text_parts:
+                                            message_text = "\n".join(text_parts)
+                                    else:
+                                        # Content is a single item
+                                        if hasattr(event.item.content, 'text'):
+                                            message_text = event.item.content.text
+                                        else:
+                                            message_text = str(event.item.content)
+                                
+                                # Try direct text attribute
+                                elif hasattr(event.item, 'text') and event.item.text:
+                                    message_text = event.item.text
+                                
+                                # Try raw_item if available
+                                elif hasattr(event.item, 'raw_item') and event.item.raw_item:
+                                    raw_item = event.item.raw_item
+                                    if hasattr(raw_item, 'content') and raw_item.content:
+                                        if isinstance(raw_item.content, list):
+                                            text_parts = []
+                                            for content_part in raw_item.content:
+                                                if hasattr(content_part, 'text') and content_part.text:
+                                                    text_parts.append(content_part.text)
+                                            if text_parts:
+                                                message_text = "\n".join(text_parts)
+                                        elif hasattr(raw_item.content, 'text'):
+                                            message_text = raw_item.content.text
+                                
+                                if message_text:
+                                    log_technical("debug", f"Successfully extracted text manually: {len(message_text)} chars")
+                                    
+                            except Exception as manual_error:
+                                log_technical("debug", f"Manual extraction failed: {manual_error}")
+                        
+                        # If we got text, process it
                         if message_text and len(message_text.strip()) > 0:
                             # Collect the full response for returning to user
                             collected_responses.append(message_text)
@@ -388,33 +534,49 @@ class MCPToolCallLogger:
                             else:
                                 log_agent(f"Agent reasoning: {message_text}")
                                 
-                            log_technical("debug", f"Full agent response: {message_text}")
-                    except Exception:
-                        log_technical("debug", "Agent generated a response")
+                            log_technical("debug", f"Full agent response: {message_text[:500]}...")
+                        else:
+                            # Could not extract text, log the raw item for debugging
+                            log_technical("debug", f"Could not extract text from message item, raw type: {type(event.item)}")
+                            try:
+                                item_repr = repr(event.item)
+                                if len(item_repr) > 500:
+                                    item_repr = item_repr[:500] + "..."
+                                log_technical("debug", f"Raw item repr: {item_repr}")
+                            except Exception:
+                                log_technical("debug", "Could not get repr of raw item")
+                                
+                    except Exception as extract_error:
+                        log_technical("warning", f"Error processing message output item: {extract_error}")
+                        # Still log that we got a response
+                        log_technical("debug", "Agent generated a response (text extraction failed)")
                         
         # Try to get the final result from the stream
         try:
             final_result = await result.result()
+            log_technical("info", "Successfully obtained final result from stream")
             return final_result
         except AttributeError:
+            log_technical("info", "Stream doesn't have result() method, using collected responses")
             # If streaming API doesn't have result() method, use collected responses
             if collected_responses:
                 # Combine all collected responses
                 full_response = "\n\n".join(collected_responses)
-                log_technical("info", "Using collected responses as final result")
+                log_technical("info", f"Using collected responses as final result: {len(full_response)} chars")
                 return SimpleResult(full_response)
             else:
                 log_technical("warning", "No responses collected from streaming API")
                 return SimpleResult("Task completed successfully with MCP tools")
         except Exception as e:
+            log_technical("warning", f"Error extracting final result: {e}")
             # Handle any other issues with result extraction
             if collected_responses:
                 # Use collected responses as fallback
                 full_response = "\n\n".join(collected_responses)
-                log_technical("warning", f"Error extracting final result: {e}, using collected responses")
+                log_technical("warning", f"Using collected responses as fallback: {len(full_response)} chars")
                 return SimpleResult(full_response)
             else:
-                log_technical("warning", f"Error extracting final result: {e}, returning success indicator")
+                log_technical("warning", "No collected responses available, returning success indicator")
                 return SimpleResult("Task completed successfully with MCP tools")
 
 class TinyAgent:

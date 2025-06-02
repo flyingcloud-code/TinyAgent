@@ -18,7 +18,7 @@ mcp:
     - "filesystem"
     - "sequential-thinking"
     - "my-search"  # 启用SSE搜索服务器
-    # - "fetch"  # 暂时禁用，连接有问题
+    - "fetch" 
     # - "time"
     # - "my-search"
 

@@ -31,10 +31,10 @@ servers:
     
   my-search:
     type: "sse"
-    url: "http://localhost:8081/sse"
+    url: "http://192.168.1.3:8081/sse"
     env: {}
     description: "Search the web via google and get content from web"
-    enabled: false  # 启用SSE服务器 - 测试显示服务器正常
+    enabled: true  # 启用SSE服务器 - 测试显示服务器正常
     category: "web_operations"
     
   sequential-thinking: 
