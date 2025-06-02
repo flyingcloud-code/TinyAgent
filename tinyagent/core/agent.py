@@ -462,90 +462,28 @@ class MCPToolCallLogger:
                 elif event.item.type == "message_output_item":
                     # Message output - collect for final result
                     try:
-                        # Try multiple methods to extract text from the message item
-                        message_text = None
-                        
-                        # Method 1: Try ItemHelpers first (most reliable)
+                        # Try ItemHelpers before falling back to raw object
                         try:
                             from agents import ItemHelpers
                             message_text = ItemHelpers.text_message_output(event.item)
                             if message_text and len(message_text.strip()) > 0:
-                                log_technical("debug", f"Successfully extracted text using ItemHelpers: {len(message_text)} chars")
-                        except ImportError:
-                            log_technical("debug", "ItemHelpers not available, trying manual extraction")
-                        except Exception as helper_error:
-                            log_technical("debug", f"ItemHelpers failed: {helper_error}, trying manual extraction")
-                        
-                        # Method 2: Manual extraction if ItemHelpers failed
-                        if not message_text:
-                            try:
-                                # Try to access content directly
-                                if hasattr(event.item, 'content') and event.item.content:
-                                    if isinstance(event.item.content, list):
-                                        # Content is a list of content parts
-                                        text_parts = []
-                                        for content_part in event.item.content:
-                                            if hasattr(content_part, 'text') and content_part.text:
-                                                text_parts.append(content_part.text)
-                                            elif hasattr(content_part, 'content') and content_part.content:
-                                                text_parts.append(str(content_part.content))
-                                        if text_parts:
-                                            message_text = "\n".join(text_parts)
-                                    else:
-                                        # Content is a single item
-                                        if hasattr(event.item.content, 'text'):
-                                            message_text = event.item.content.text
-                                        else:
-                                            message_text = str(event.item.content)
+                                collected_responses.append(message_text)
                                 
-                                # Try direct text attribute
-                                elif hasattr(event.item, 'text') and event.item.text:
-                                    message_text = event.item.text
-                                
-                                # Try raw_item if available
-                                elif hasattr(event.item, 'raw_item') and event.item.raw_item:
-                                    raw_item = event.item.raw_item
-                                    if hasattr(raw_item, 'content') and raw_item.content:
-                                        if isinstance(raw_item.content, list):
-                                            text_parts = []
-                                            for content_part in raw_item.content:
-                                                if hasattr(content_part, 'text') and content_part.text:
-                                                    text_parts.append(content_part.text)
-                                            if text_parts:
-                                                message_text = "\n".join(text_parts)
-                                        elif hasattr(raw_item.content, 'text'):
-                                            message_text = raw_item.content.text
-                                
-                                if message_text:
-                                    log_technical("debug", f"Successfully extracted text manually: {len(message_text)} chars")
+                                # Log abbreviated version for context
+                                if len(message_text) > 300:
+                                    abbreviated = message_text[:300] + "..."
+                                    log_agent(f"Agent reasoning: {abbreviated}")
+                                else:
+                                    log_agent(f"Agent reasoning: {message_text}")
                                     
-                            except Exception as manual_error:
-                                log_technical("debug", f"Manual extraction failed: {manual_error}")
-                        
-                        # If we got text, process it
-                        if message_text and len(message_text.strip()) > 0:
-                            # Collect the full response for returning to user
-                            collected_responses.append(message_text)
-                            
-                            # Log abbreviated version for context
-                            if len(message_text) > 300:
-                                abbreviated = message_text[:300] + "..."
-                                log_agent(f"Agent reasoning: {abbreviated}")
+                                log_technical("debug", f"Full agent response: {message_text[:500]}...")
                             else:
-                                log_agent(f"Agent reasoning: {message_text}")
-                                
-                            log_technical("debug", f"Full agent response: {message_text[:500]}...")
-                        else:
-                            # Could not extract text, log the raw item for debugging
-                            log_technical("debug", f"Could not extract text from message item, raw type: {type(event.item)}")
-                            try:
-                                item_repr = repr(event.item)
-                                if len(item_repr) > 500:
-                                    item_repr = item_repr[:500] + "..."
-                                log_technical("debug", f"Raw item repr: {item_repr}")
-                            except Exception:
-                                log_technical("debug", "Could not get repr of raw item")
-                                
+                                log_technical("warning", f"ItemHelpers returned empty text for message_output_item")
+                                collected_responses.append("[Agent response received but text extraction failed]")
+                        except Exception as helper_error:
+                            log_technical("warning", f"ItemHelpers failed: {helper_error}")
+                            collected_responses.append("[Error: Unable to extract response text - please check logs]")
+                        
                     except Exception as extract_error:
                         log_technical("warning", f"Error processing message output item: {extract_error}")
                         # Still log that we got a response
@@ -873,13 +811,59 @@ class TinyAgent:
     def get_agent(self) -> Agent:
         """
         Get the underlying Agent instance, creating it if necessary.
+        If MCP connections are already established, returns an agent with MCP servers.
         
         Returns:
-            Agent instance
+            Agent instance (with MCP servers if available)
         """
+        # If MCP connections are initialized and we have connected servers,
+        # return an MCP-enabled agent
+        if self._connections_initialized and self._persistent_connections:
+            log_technical("info", f"Returning MCP-enabled agent with {len(self._persistent_connections)} servers")
+            
+            # Create agent with MCP servers
+            mcp_agent = Agent(
+                name=self.config.agent.name,
+                instructions=self.instructions,
+                model=self._create_model_instance(self.model_name),
+                mcp_servers=list(self._persistent_connections.values())
+            )
+            
+            # Add model_settings if needed
+            if not self._should_use_litellm(self.model_name):
+                from agents import ModelSettings
+                mcp_agent.model_settings = ModelSettings(temperature=self.config.llm.temperature)
+            
+            return mcp_agent
+        
+        # Otherwise, return simple agent (or create if needed)
         if self._agent is None:
             self._agent = self._create_agent()
         return self._agent
+    
+    async def get_agent_with_mcp(self) -> Agent:
+        """
+        Get the Agent instance with MCP servers connected.
+        
+        Returns:
+            Agent instance with MCP servers
+        """
+        # Ensure MCP connections are established
+        connected_servers = await self._ensure_mcp_connections()
+        
+        if not connected_servers:
+            # No MCP servers available, return simple agent
+            return self.get_agent()
+        
+        # Create MCP-enabled agent
+        mcp_agent = Agent(
+            name=self.config.agent.name,
+            instructions=self.instructions,
+            model=self._create_model_instance(self.model_name),
+            mcp_servers=connected_servers
+        )
+        
+        return mcp_agent
     
     async def run(self, message: str, **kwargs) -> Any:
         """
@@ -1322,13 +1306,56 @@ class TinyAgent:
     def get_available_tools(self) -> List[str]:
         """
         Get list of available tools from MCP servers.
+        This is a synchronous version that returns cached tools if connections exist.
         
         Returns:
             List of tool names
         """
-        # This would require connecting to servers and listing tools
-        # For now, return server names as a proxy
-        return [info.name for info in self.mcp_manager.get_server_info()]
+        # If connections are not initialized, return empty list
+        if not self._connections_initialized or not self._persistent_connections:
+            return []
+        
+        tools = []
+        for server_name, connection in self._persistent_connections.items():
+            try:
+                # For connected servers, we should have cached tool info
+                # Since this is sync method, we'll use a placeholder format
+                tools.append(f"{server_name}_tools_available")
+            except Exception as e:
+                log_technical("warning", f"Error getting tools from {server_name}: {e}")
+                continue
+        
+        return tools
+    
+    async def get_available_tools_async(self) -> List[str]:
+        """
+        Get list of available tools from MCP servers (async version).
+        
+        Returns:
+            List of tool names
+        """
+        # Ensure connections are established
+        await self._ensure_mcp_connections()
+        
+        tools = []
+        for server_name, connection in self._persistent_connections.items():
+            try:
+                # Get tools from the connection
+                if hasattr(connection, 'list_tools'):
+                    server_tools = await connection.list_tools()
+                    if hasattr(server_tools, 'tools'):
+                        for tool in server_tools.tools:
+                            tools.append(f"{server_name}:{tool.name}")
+                    else:
+                        tools.append(f"{server_name}:unknown_tools")
+                else:
+                    tools.append(f"{server_name}:no_list_tools_method")
+            except Exception as e:
+                log_technical("warning", f"Error getting tools from {server_name}: {e}")
+                tools.append(f"{server_name}:error")
+                continue
+        
+        return tools
     
     def reload_mcp_servers(self):
         """
@@ -1487,28 +1514,19 @@ class TinyAgent:
                 if event.type == "run_item_stream_event":
                     if event.item.type == "message_output_item":
                         try:
-                            # Try to access content attribute safely
-                            if hasattr(event.item, 'content') and event.item.content:
-                                for content_part in event.item.content:
-                                    if hasattr(content_part, 'text'):
-                                        chunk_text = content_part.text
-                                        collected_content += chunk_text
-                                        yield chunk_text
-                                    elif hasattr(content_part, 'content') and content_part.content:
-                                        chunk_text = str(content_part.content)
-                                        collected_content += chunk_text
-                                        yield chunk_text
-                            elif hasattr(event.item, 'text'):
-                                # Fallback: try to access text directly
-                                chunk_text = event.item.text
-                                collected_content += chunk_text
-                                yield chunk_text
-                            else:
-                                # Ultimate fallback: convert the entire item to string
-                                chunk_text = str(event.item)
-                                if len(chunk_text) > 0 and chunk_text != str(event.item.__class__):
-                                    collected_content += chunk_text
-                                    yield chunk_text
+                            # Try ItemHelpers before falling back to raw object
+                            try:
+                                from agents import ItemHelpers
+                                message_text = ItemHelpers.text_message_output(event.item)
+                                if message_text and len(message_text.strip()) > 0:
+                                    collected_content += message_text
+                                    yield message_text
+                                else:
+                                    log_technical("warning", f"ItemHelpers returned empty text for message_output_item")
+                                    yield "[Agent response received but text extraction failed]"
+                            except Exception as helper_error:
+                                log_technical("warning", f"ItemHelpers failed: {helper_error}")
+                                yield "[Error: Unable to extract response text - please check logs]"
                         except Exception as content_error:
                             log_technical("warning", f"Error accessing message content: {content_error}")
                             # Try alternative access methods
