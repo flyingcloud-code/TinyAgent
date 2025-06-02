@@ -12,6 +12,8 @@ import sys
 from typing import Optional, Dict, Any
 from pathlib import Path
 import os
+import uuid
+from datetime import datetime
 
 from ..core.config import get_config, set_profile
 from ..core.agent import create_agent, AGENTS_AVAILABLE
@@ -62,41 +64,31 @@ def cli(verbose: bool, profile: Optional[str], config_dir: Optional[str]):
 @click.option('--api-key', help='OpenAI API key (overrides environment)')
 def run(prompt: str, model: Optional[str], instructions: Optional[str], 
         output: Optional[str], api_key: Optional[str]):
-    """Run TinyAgent with a prompt."""
+    """Run TinyAgent with a single task."""
     try:
-        log_user("Starting TinyAgent...")
-        log_user(f"Task: {prompt}")
-        
-        # Create agent
-        log_agent("Initializing agent...")
-        agent = create_agent(
+        # 使用新的run_agent函数，它包含了完整的日志追踪
+        result = run_agent(
+            task=prompt,
             model=model,
             instructions=instructions,
             api_key=api_key
         )
         
-        log_agent(f"Using model: {agent.model_name}")
-        log_technical("info", f"Agent config: {agent.config.agent.name}")
+        # 处理输出
+        if hasattr(result, 'final_output'):
+            output_text = result.final_output
+        else:
+            output_text = str(result)
         
-        # Run agent
-        log_agent("Processing your request...")
-        result = agent.run_sync(prompt)
-        
-        # Display result
-        output_text = str(result.final_output)
-        log_user("[OK] Task completed!")
-        click.echo("\n" + "="*50)
-        click.echo(output_text)
-        click.echo("="*50)
-        
-        # Save to file if requested
         if output:
             Path(output).write_text(output_text, encoding='utf-8')
             log_user(f"[SAVE] Output saved to: {output}")
+        else:
+            # 输出已经在run_agent中显示了，这里不需要重复显示
+            pass
             
     except Exception as e:
-        log_user(f"[ERROR] {e}")
-        log_technical("error", f"Full error details: {e}", "tinyagent.cli")
+        log_user(f"[ERROR] {str(e)}")
         sys.exit(1)
 
 @cli.command()
@@ -384,37 +376,16 @@ def analysis(topic: str, output: Optional[str], format: str):
 def interactive(api_key: Optional[str]):
     """Start an interactive TinyAgent session."""
     try:
-        agent = create_agent(api_key=api_key)
+        # 设置API key环境变量（如果提供）
+        if api_key:
+            os.environ['OPENAI_API_KEY'] = api_key
         
-        click.echo("[INTERACTIVE] TinyAgent Interactive Mode")
-        click.echo("Type 'quit', 'exit', or press Ctrl+C to exit")
-        click.echo("=" * 40)
-        
-        while True:
-            try:
-                prompt = click.prompt("\n[USER] You", type=str)
-                
-                if prompt.lower() in ['quit', 'exit', 'q']:
-                    break
-                
-                if prompt.strip() == '':
-                    continue
-                
-                click.echo("[AGENT] TinyAgent:", nl=False)
-                result = agent.run_sync(prompt)
-                click.echo(f" {result.final_output}")
-                
-            except KeyboardInterrupt:
-                break
-            except EOFError:
-                break
-            except Exception as e:
-                click.echo(f"[ERROR] Error: {e}", err=True)
-        
-        click.echo("\n[BYE] Goodbye!")
+        # 使用新的interactive_mode函数，它包含了完整的会话追踪
+        interactive_mode()
         
     except Exception as e:
-        click.echo(f"[ERROR] Error starting interactive mode: {e}", err=True)
+        log_user(f"[ERROR] Error starting interactive mode: {e}")
+        log_technical("error", f"Interactive mode startup failed: {e}")
         sys.exit(1)
 
 @cli.command()
@@ -453,6 +424,199 @@ def test_mcp(server: Optional[str]):
     except Exception as e:
         click.echo(f"[ERROR] Error testing MCP servers: {e}", err=True)
         sys.exit(1)
+
+def interactive_mode():
+    """
+    Run TinyAgent in interactive chat mode.
+    """
+    # 生成唯一的session ID
+    session_id = str(uuid.uuid4())[:8]
+    session_start_time = datetime.now()
+    
+    # Session 开始日志
+    log_technical("info", f"{'='*60}")
+    log_technical("info", f"INTERACTIVE SESSION START - ID: {session_id}")
+    log_technical("info", f"Session Start Time: {session_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    log_technical("info", f"{'='*60}")
+    
+    log_user("[INTERACTIVE] TinyAgent Interactive Mode")
+    log_user("Type 'quit', 'exit', or press Ctrl+C to exit")
+    log_user("=" * 40)
+    
+    # 创建Agent实例并复用
+    try:
+        agent = create_agent()
+        log_technical("info", f"Agent instance created for session {session_id}")
+        log_agent("Agent initialized and ready for interactive use")
+        log_user(f"[READY] Using model: {agent.model_name}")
+    except Exception as e:
+        log_user(f"[ERROR] Failed to initialize TinyAgent: {str(e)}")
+        log_technical("error", f"Agent initialization failed: {e}")
+        return
+    
+    message_count = 0
+    
+    try:
+        while True:
+            try:
+                # 获取用户输入
+                user_input = input("\n[USER] You: ").strip()
+                
+                # 退出命令
+                if user_input.lower() in ['quit', 'exit', 'q']:
+                    break
+                
+                if not user_input:
+                    continue
+                
+                # 消息计数
+                message_count += 1
+                message_start_time = datetime.now()
+                
+                # Message 开始日志
+                log_technical("info", f"--- MESSAGE {message_count} START ---")
+                log_technical("info", f"Session: {session_id} | Message: {message_count}")
+                log_technical("info", f"Message Start Time: {message_start_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+                log_technical("info", f"User Input: {user_input}")
+                log_technical("info", f"--- Processing Message {message_count} ---")
+                
+                # 显示正在思考状态
+                print("\n[AGENT] TinyAgent:", end=" ", flush=True)
+                
+                # 运行Agent - 使用流式输出
+                try:
+                    response_text = ""
+                    for chunk in agent.run_stream_sync(user_input):
+                        if chunk and not chunk.startswith("[ERROR]"):
+                            print(chunk, end="", flush=True)
+                            response_text += chunk
+                        elif chunk.startswith("[ERROR]"):
+                            print(f"\n{chunk}")
+                            response_text = chunk
+                            break
+                    
+                    print()  # 新行
+                    
+                    # Message 结束日志
+                    message_end_time = datetime.now()
+                    message_duration = (message_end_time - message_start_time).total_seconds()
+                    
+                    log_technical("info", f"--- MESSAGE {message_count} END ---")
+                    log_technical("info", f"Message End Time: {message_end_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+                    log_technical("info", f"Message Duration: {message_duration:.3f}s")
+                    log_technical("info", f"Response Length: {len(response_text)} characters")
+                    log_technical("info", f"Response Preview: {response_text[:100]}...")
+                    log_technical("info", f"--- Message {message_count} Complete ---")
+                    
+                except Exception as e:
+                    message_end_time = datetime.now()
+                    message_duration = (message_end_time - message_start_time).total_seconds()
+                    
+                    print(f"\n[ERROR] {str(e)}")
+                    log_technical("error", f"Message {message_count} failed after {message_duration:.3f}s: {e}")
+                    log_technical("info", f"--- MESSAGE {message_count} END (ERROR) ---")
+                    
+            except KeyboardInterrupt:
+                print("\n[INFO] Session interrupted by user")
+                log_technical("info", f"Session {session_id} interrupted by Ctrl+C")
+                break
+            except EOFError:
+                print("\n[INFO] Session ended")
+                log_technical("info", f"Session {session_id} ended by EOF")
+                break
+                
+    except Exception as e:
+        log_user(f"[ERROR] Interactive session error: {str(e)}")
+        log_technical("error", f"Interactive session {session_id} crashed: {e}")
+    finally:
+        # Session 结束日志
+        session_end_time = datetime.now()
+        session_duration = (session_end_time - session_start_time).total_seconds()
+        
+        log_user("[INFO] Goodbye!")
+        
+        log_technical("info", f"{'='*60}")
+        log_technical("info", f"INTERACTIVE SESSION END - ID: {session_id}")
+        log_technical("info", f"Session End Time: {session_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        log_technical("info", f"Session Duration: {session_duration:.2f}s")
+        log_technical("info", f"Total Messages Processed: {message_count}")
+        if message_count > 0:
+            log_technical("info", f"Average Message Duration: {session_duration/message_count:.2f}s")
+        log_technical("info", f"{'='*60}")
+
+def run_agent(task: str, **kwargs):
+    """
+    Run TinyAgent with a single task.
+    
+    Args:
+        task: The task for the agent to perform
+        **kwargs: Additional arguments for the agent
+    """
+    # 生成唯一的run ID
+    run_id = str(uuid.uuid4())[:8]
+    run_start_time = datetime.now()
+    
+    # Run 开始日志
+    log_technical("info", f"{'='*50}")
+    log_technical("info", f"SINGLE RUN START - ID: {run_id}")
+    log_technical("info", f"Run Start Time: {run_start_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+    log_technical("info", f"Task: {task}")
+    log_technical("info", f"{'='*50}")
+    
+    log_user("Starting TinyAgent...")
+    log_user(f"Task: {task}")
+    log_agent("Initializing agent...")
+    
+    try:
+        # 创建Agent
+        agent = create_agent()
+        log_agent(f"Using model: {agent.model_name}")
+        log_technical("info", f"Agent config: {agent.config.agent.name}")
+        log_agent("Processing your request...")
+        
+        # 运行Agent
+        result = agent.run_sync(task, **kwargs)
+        
+        # 处理结果
+        if hasattr(result, 'final_output'):
+            response_text = result.final_output
+        else:
+            response_text = str(result)
+        
+        log_agent("Task completed successfully")
+        log_user("[OK] Task completed!")
+        
+        # Run 结束日志 (成功)
+        run_end_time = datetime.now()
+        run_duration = (run_end_time - run_start_time).total_seconds()
+        
+        log_technical("info", f"{'='*50}")
+        log_technical("info", f"SINGLE RUN END - ID: {run_id}")
+        log_technical("info", f"Run End Time: {run_end_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        log_technical("info", f"Run Duration: {run_duration:.3f}s")
+        log_technical("info", f"Status: SUCCESS")
+        log_technical("info", f"Response Length: {len(response_text)} characters")
+        log_technical("info", f"{'='*50}")
+        
+        return result
+        
+    except Exception as e:
+        # Run 结束日志 (失败)
+        run_end_time = datetime.now()
+        run_duration = (run_end_time - run_start_time).total_seconds()
+        
+        log_user(f"[ERROR] {str(e)}")
+        log_technical("error", f"Full error details: {e}")
+        
+        log_technical("info", f"{'='*50}")
+        log_technical("info", f"SINGLE RUN END - ID: {run_id}")
+        log_technical("info", f"Run End Time: {run_end_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        log_technical("info", f"Run Duration: {run_duration:.3f}s")
+        log_technical("info", f"Status: FAILED")
+        log_technical("info", f"Error: {str(e)}")
+        log_technical("info", f"{'='*50}")
+        
+        raise
 
 def main():
     """Main entry point for the CLI."""

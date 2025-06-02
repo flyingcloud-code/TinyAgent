@@ -37,49 +37,72 @@ class UserFriendlyFormatter(logging.Formatter):
         self.show_timestamps = show_timestamps
     
     def format(self, record):
-        """Format log record with user-friendly style"""
+        """Format log record for user display"""
+        message = record.getMessage()
+        
+        # Clean Unicode characters for Windows console compatibility
+        message = clean_unicode_for_console(message)
+        
+        # Convert timestamp
         timestamp = ""
         if self.show_timestamps:
-            timestamp = f"{datetime.now().strftime('%H:%M:%S')} "
+            timestamp = f"{datetime.fromtimestamp(record.created).strftime('%H:%M:%S')} | "
         
-        # Map log levels to user-friendly prefixes (ASCII only for Windows compatibility)
+        # Determine level prefix with ASCII characters only
         level_prefixes = {
-            'USER': '>>',      # User input/output
-            'AGENT': '**',     # Agent responses  
-            'TOOL': '++',      # Tool calls
-            'INFO': '--',      # General info
-            'WARNING': '!!',   # Warnings
-            'ERROR': 'XX',     # Errors
-            'DEBUG': '..'      # Debug info
+            USER_LEVEL: ">>",
+            AGENT_LEVEL: "**", 
+            TOOL_LEVEL: "++"
         }
+        prefix = level_prefixes.get(record.levelno, "??")
         
-        prefix = level_prefixes.get(record.levelname, '--')
-        
-        # Apply colors if enabled
-        if self.enable_colors:
-            color_map = {
-                'USER': '\033[96m',     # Cyan
-                'AGENT': '\033[92m',    # Green
-                'TOOL': '\033[93m',     # Yellow
-                'INFO': '\033[94m',     # Blue
-                'WARNING': '\033[95m',  # Magenta
-                'ERROR': '\033[91m',    # Red
-                'DEBUG': '\033[90m'     # Gray
-            }
-            reset = '\033[0m'
-            color = color_map.get(record.levelname, '')
-            return f"{timestamp}{color}{prefix} {record.getMessage()}{reset}"
+        # Format status indicators with ASCII
+        if "[OK]" in message or "completed successfully" in message.lower():
+            status = "[OK]"
+        elif "[ERROR]" in message or "failed" in message.lower() or "error" in message.lower():
+            status = "[ERROR]"
+        elif "[SAVE]" in message or "saved" in message.lower():
+            status = "[SAVE]"
         else:
-            return f"{timestamp}{prefix} {record.getMessage()}"
+            status = ""
+        
+        # Apply colors if enabled (but keep ASCII characters)
+        if self.enable_colors:
+            if record.levelno == USER_LEVEL:
+                prefix = f"\033[96m{prefix}\033[0m"  # Cyan
+            elif record.levelno == AGENT_LEVEL:
+                prefix = f"\033[94m{prefix}\033[0m"  # Blue
+            elif record.levelno == TOOL_LEVEL:
+                prefix = f"\033[93m{prefix}\033[0m"  # Yellow
+            
+            # Color status indicators
+            if status == "[OK]":
+                status = f"\033[92m{status}\033[0m"  # Green
+            elif status == "[ERROR]":
+                status = f"\033[91m{status}\033[0m"  # Red
+            elif status == "[SAVE]":
+                status = f"\033[95m{status}\033[0m"  # Magenta
+        
+        # Combine formatted message
+        formatted = f"{timestamp}{prefix} {status} {message}".strip()
+        return formatted
 
 
 class TechnicalFormatter(logging.Formatter):
-    """Detailed formatter for file logs with full technical information"""
+    """Formatter for technical/debugging logs with full context"""
     
     def __init__(self):
         super().__init__(
-            '%(asctime)s | %(levelname)-8s | %(name)-25s | %(funcName)-15s | %(message)s'
+            fmt='%(asctime)s | %(levelname)-8s | %(name)-20s | %(funcName)-12s | %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
         )
+    
+    def format(self, record):
+        """Format technical log with full context"""
+        # Clean Unicode characters for console compatibility
+        original_msg = record.getMessage()
+        record.msg = clean_unicode_for_console(original_msg)
+        return super().format(record)
 
 
 class StructuredFormatter(logging.Formatter):
@@ -367,4 +390,104 @@ class MCPToolMetrics:
             duration=duration,
             success=success,
             output_size=output_size
-        ) 
+        )
+
+
+def clean_unicode_for_console(text: str) -> str:
+    """
+    Clean Unicode characters for Windows console compatibility.
+    Replaces common Unicode characters with ASCII equivalents.
+    """
+    if not text:
+        return text
+    
+    # Common emoji and Unicode replacements
+    replacements = {
+        '😊': ':)',
+        '😃': ':D',
+        '😄': ':D',
+        '😆': ':D',
+        '😁': ':D',
+        '🙂': ':)',
+        '😀': ':)',
+        '😎': 'B-)',
+        '😉': ';)',
+        '😭': ":'(",
+        '😢': ':(',
+        '😞': ':(',
+        '😔': ':(',
+        '❤️': '<3',
+        '💙': '<3',
+        '💚': '<3',
+        '💛': '<3',
+        '💜': '<3',
+        '👍': '+1',
+        '👎': '-1',
+        '✅': '[OK]',
+        '❌': '[ERROR]',
+        '⚠️': '[WARNING]',
+        '💡': '[IDEA]',
+        '🔥': '[HOT]',
+        '⭐': '*',
+        '🌟': '*',
+        '💯': '100%',
+        '🎉': '[CELEBRATION]',
+        '🚀': '[ROCKET]',
+        '📝': '[NOTE]',
+        '📊': '[CHART]',
+        '📈': '[UP]',
+        '📉': '[DOWN]',
+        '🏆': '[TROPHY]',
+        '💪': '[STRONG]',
+        '🤝': '[HANDSHAKE]',
+        '🙏': '[THANKS]',
+        '🔍': '[SEARCH]',
+        '💬': '[CHAT]',
+        '📧': '[EMAIL]',
+        '📱': '[PHONE]',
+        '💻': '[COMPUTER]',
+        '🖥️': '[DESKTOP]',
+        '⌨️': '[KEYBOARD]',
+        '🖱️': '[MOUSE]',
+        '🔐': '[SECURE]',
+        '🔓': '[UNLOCKED]',
+        '🔒': '[LOCKED]',
+    }
+    
+    # Apply emoji replacements first
+    cleaned_text = text
+    for unicode_char, ascii_replacement in replacements.items():
+        cleaned_text = cleaned_text.replace(unicode_char, ascii_replacement)
+    
+    # Handle Chinese and other non-ASCII characters more gracefully
+    try:
+        # Try to encode to cp1252 (Windows console encoding) first
+        cleaned_text.encode('cp1252')
+        return cleaned_text
+    except UnicodeEncodeError:
+        pass
+    
+    try:
+        # Try to encode to ASCII
+        cleaned_text.encode('ascii')
+        return cleaned_text
+    except UnicodeEncodeError:
+        # If encoding fails, replace non-ASCII chars with placeholders
+        result = []
+        for char in cleaned_text:
+            try:
+                char.encode('ascii')
+                result.append(char)
+            except UnicodeEncodeError:
+                # For Chinese characters, use a more descriptive placeholder
+                if '\u4e00' <= char <= '\u9fff':  # Chinese character range
+                    result.append('[CH]')
+                elif '\u3040' <= char <= '\u309f' or '\u30a0' <= char <= '\u30ff':  # Japanese
+                    result.append('[JP]')
+                elif '\uac00' <= char <= '\ud7af':  # Korean
+                    result.append('[KR]')
+                else:
+                    result.append('?')
+        return ''.join(result)
+    
+    return cleaned_text 

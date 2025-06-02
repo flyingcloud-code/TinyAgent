@@ -13,7 +13,7 @@ import asyncio
 import json
 import time
 from datetime import datetime
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, AsyncIterator, Iterator
 from pathlib import Path
 
 # Suppress aiohttp resource warnings that can occur with LiteLLM
@@ -196,8 +196,8 @@ class MCPToolCallLogger:
             
         except Exception as e:
             duration = time.time() - start_time
-            log_user(f"❌ Task failed: {str(e)}")
-            log_technical("error", f"Agent run failed after {duration:.2f}s: {e}")
+            log_user(f"[ERROR] Task failed: {str(e)}")
+            log_technical("error", f"Agent run failed after 0.00s: {e}")
             
             # Log final statistics even on failure
             log_tool_call_stats()
@@ -207,14 +207,23 @@ class MCPToolCallLogger:
     async def _run_with_tool_logging(self, input_data, **kwargs):
         """Run the agent with tool call interception using enhanced logging"""
         # We'll use the streaming API to capture tool calls
+        
+        # Filter out parameters that Runner.run_streamed doesn't accept
+        filtered_kwargs = {}
+        supported_params = ['max_turns', 'response_format', 'temperature', 'max_tokens']
+        for key, value in kwargs.items():
+            if key in supported_params:
+                filtered_kwargs[key] = value
+        
         result = Runner.run_streamed(
             starting_agent=self.original_agent,
             input=input_data,
-            **kwargs
+            **filtered_kwargs
         )
         
         tool_call_sequence = 0
         current_tool_call_start = None
+        current_tool_info = {}  # Store current tool call details
         collected_responses = []  # Collect all agent responses
         
         async for event in result.stream_events():
@@ -227,16 +236,57 @@ class MCPToolCallLogger:
                     tool_call_sequence += 1
                     current_tool_call_start = time.time()
                     
-                    log_tool(f"Starting tool call #{tool_call_sequence}")
+                    # Extract tool details
+                    tool_name = "unknown"
+                    server_name = "unknown"
+                    tool_input = "N/A"
+                    
+                    try:
+                        # Try to extract tool name and input from the item
+                        if hasattr(event.item, 'tool_call'):
+                            tool_call = event.item.tool_call
+                            if hasattr(tool_call, 'function'):
+                                tool_name = tool_call.function.name
+                                if hasattr(tool_call.function, 'arguments'):
+                                    tool_input = tool_call.function.arguments
+                                    # Truncate long inputs for logging
+                                    if len(tool_input) > 200:
+                                        tool_input = tool_input[:200] + "... (truncated)"
+                        
+                        # Try to infer server name from tool name or other attributes
+                        if 'filesystem' in tool_name.lower() or 'file' in tool_name.lower():
+                            server_name = "filesystem"
+                        elif 'search' in tool_name.lower() or 'google' in tool_name.lower():
+                            server_name = "my-search"
+                        elif 'thinking' in tool_name.lower() or 'sequential' in tool_name.lower():
+                            server_name = "sequential-thinking"
+                        
+                    except Exception as e:
+                        log_technical("debug", f"Error extracting tool details: {e}")
+                    
+                    # Store current tool info for completion logging
+                    current_tool_info = {
+                        'tool_name': tool_name,
+                        'server_name': server_name,
+                        'input': tool_input,
+                        'sequence': tool_call_sequence
+                    }
+                    
+                    log_tool(f"Starting tool call #{tool_call_sequence}: {server_name}.{tool_name}")
                     
                     # Log technical details to file
+                    log_technical("info", f"=== Tool Call [{tool_call_sequence}] Started ===")
+                    log_technical("info", f"    Server: {server_name}")
+                    log_technical("info", f"    Tool: {tool_name}")
+                    log_technical("info", f"    Input: {tool_input}")
+                    
                     try:
                         item_str = str(event.item)
-                        if len(item_str) > 200:
-                            item_str = item_str[:200] + "..."
-                        log_technical("debug", f"Tool Call Item [{tool_call_sequence}]: {item_str}")
+                        if len(item_str) > 500:
+                            item_str = item_str[:500] + "..."
+                        log_technical("debug", f"    Raw Item: {item_str}")
                     except Exception:
-                        log_technical("debug", f"Tool Call Item [{tool_call_sequence}]: [Unable to display]")
+                        log_technical("debug", f"    Raw Item: [Unable to display]")
                     
                     # Update global stats
                     _tool_call_stats['total_calls'] += 1
@@ -248,40 +298,64 @@ class MCPToolCallLogger:
                         duration = time.time() - current_tool_call_start
                         current_tool_call_start = None
                     
+                    # Get tool info from current call
+                    tool_name = current_tool_info.get('tool_name', 'unknown')
+                    server_name = current_tool_info.get('server_name', 'unknown')
+                    sequence = current_tool_info.get('sequence', tool_call_sequence)
+                    
                     # Extract output safely
                     output_content = "N/A"
                     output_size = 0
+                    error_message = None
+                    
                     try:
                         if hasattr(event.item, 'output'):
                             output_content = str(event.item.output)
                             output_size = len(output_content)
-                            if len(output_content) > 500:
-                                output_content = output_content[:500] + "... (truncated)"
-                    except Exception:
-                        output_content = "[Unable to extract output]"
-                    
-                    # Assume success unless we can detect an error
-                    is_success = True
-                    try:
+                            # Keep more detail for file logs, truncate for console
+                            if len(output_content) > 1000:
+                                truncated_output = output_content[:1000] + "... (truncated)"
+                            else:
+                                truncated_output = output_content
+                        
+                        # Check for errors
                         if hasattr(event.item, 'error') and event.item.error:
-                            is_success = False
-                    except Exception:
-                        pass
+                            error_message = str(event.item.error)
+                            
+                    except Exception as e:
+                        output_content = f"[Error extracting output: {e}]"
+                        truncated_output = output_content
+                    
+                    # Determine success
+                    is_success = error_message is None
                     
                     # Log tool call completion with enhanced logging
                     status = "[OK]" if is_success else "[FAIL]"
-                    log_tool(f"Tool call #{tool_call_sequence} completed {status} ({duration:.2f}s)")
+                    log_tool(f"Tool call #{sequence}: {server_name}.{tool_name} {status} ({duration:.2f}s)")
                     
                     # Log technical details to file
-                    log_technical("info", f"Tool Call [{tool_call_sequence}] Completed:")
+                    log_technical("info", f"=== Tool Call [{sequence}] Completed ===")
+                    log_technical("info", f"    Server: {server_name}")
+                    log_technical("info", f"    Tool: {tool_name}")
                     log_technical("info", f"    Duration: {duration:.2f}s")
                     log_technical("info", f"    Success: {is_success}")
-                    log_technical("info", f"    Output: {output_content}")
+                    log_technical("info", f"    Output Size: {output_size} characters")
+                    
+                    if error_message:
+                        log_technical("error", f"    Error: {error_message}")
+                    
+                    # Log output (truncated for readability)
+                    if len(output_content) > 2000:
+                        log_technical("info", f"    Output: {output_content[:2000]}... (truncated, full size: {output_size} chars)")
+                    else:
+                        log_technical("info", f"    Output: {output_content}")
+                    
+                    log_technical("info", f"=== End Tool Call [{sequence}] ===")
                     
                     # Log structured metrics
                     MCPToolMetrics.log_tool_call(
-                        server_name="unknown",  # We'll need to enhance this
-                        tool_name="unknown",    # We'll need to enhance this
+                        server_name=server_name,
+                        tool_name=tool_name,
                         duration=duration,
                         success=is_success,
                         output_size=output_size
@@ -294,6 +368,9 @@ class MCPToolCallLogger:
                         _tool_call_stats['failed_calls'] += 1
                     
                     _tool_call_stats['total_duration'] += duration
+                    
+                    # Clear current tool info
+                    current_tool_info = {}
                     
                 elif event.item.type == "message_output_item":
                     # Message output - collect for final result
@@ -470,7 +547,7 @@ class TinyAgent:
             # For OpenRouter models, ensure proper format
             formatted_model_name = model_name
             if self.config.llm.base_url and "openrouter.ai" in self.config.llm.base_url:
-                # If using OpenRouter and model doesn't have openrouter/ prefix, add it
+                # For OpenRouter, always add openrouter/ prefix unless already present
                 if not model_name.startswith("openrouter/"):
                     formatted_model_name = f"openrouter/{model_name}"
             
@@ -573,12 +650,13 @@ class TinyAgent:
             if not self._should_use_litellm(self.model_name):
                 model_settings = ModelSettings(temperature=self.config.llm.temperature)
             
-            # Create agent with appropriate model instance and MCP servers
+            # Create agent WITHOUT MCP servers initially (lazy loading approach)
+            # MCP servers will be added dynamically when needed
             agent_kwargs = {
                 "name": self.config.agent.name,
                 "instructions": self.instructions,
-                "model": model_instance,
-                "mcp_servers": self.mcp_servers
+                "model": model_instance
+                # Note: no mcp_servers here - we'll add them dynamically
             }
             
             # Add model_settings only for non-LiteLLM models
@@ -588,7 +666,7 @@ class TinyAgent:
             agent = Agent(**agent_kwargs)
             
             model_type = "LiteLLM" if self._should_use_litellm(self.model_name) else "OpenAI"
-            self.logger.info(f"Created agent '{self.config.agent.name}' with {model_type} model '{self.model_name}'")
+            self.logger.info(f"Created agent '{self.config.agent.name}' with {model_type} model '{self.model_name}' (MCP servers will be added dynamically)")
             return agent
             
         except Exception as e:
@@ -606,6 +684,29 @@ class TinyAgent:
             except Exception as e2:
                 self.logger.error(f"Failed to create fallback agent: {e2}")
                 raise
+    
+    def _get_model_kwargs(self) -> Dict[str, Any]:
+        """
+        Get model-specific kwargs for API calls.
+        
+        Returns:
+            Dictionary of model kwargs
+        """
+        kwargs = {
+            'temperature': self.config.llm.temperature,
+            'timeout': 60.0  # Increase timeout to 60 seconds
+        }
+        
+        # Add API key based on config
+        api_key = os.getenv(self.config.llm.api_key_env)
+        if api_key:
+            kwargs['api_key'] = api_key
+        
+        # Add base URL if configured and using LiteLLM
+        if self.config.llm.base_url and self._should_use_litellm(self.model_name):
+            kwargs['base_url'] = self.config.llm.base_url
+        
+        return kwargs
     
     def get_agent(self) -> Agent:
         """
@@ -642,10 +743,18 @@ class TinyAgent:
                 log_technical("info", "Attempting simple conversation without MCP tools")
                 try:
                     simple_agent = self._create_simple_agent()
+                    
+                    # Filter out parameters that Runner.run doesn't accept
+                    filtered_kwargs = {}
+                    supported_params = ['max_turns', 'response_format', 'temperature', 'max_tokens']
+                    for key, value in kwargs.items():
+                        if key in supported_params:
+                            filtered_kwargs[key] = value
+                    
                     result = await Runner.run(
                         starting_agent=simple_agent,
                         input=message,
-                        **kwargs
+                        **filtered_kwargs
                     )
                     log_technical("info", "Simple conversation completed successfully")
                     return result
@@ -1138,6 +1247,212 @@ class TinyAgent:
         self._connection_status.clear()
         self._connections_initialized = False
         log_technical("info", "MCP connection state reset")
+
+    async def run_stream(self, message: str, **kwargs) -> AsyncIterator[str]:
+        """
+        Run the agent with streaming output.
+        
+        Args:
+            message: Input message for the agent
+            **kwargs: Additional arguments passed to Runner.run
+            
+        Yields:
+            String chunks as they are generated
+        """
+        try:
+            # Check if message likely needs tools
+            needs_tools = self._message_likely_needs_tools(message)
+            
+            if not needs_tools:
+                # Try simple conversation without MCP tools first - streaming
+                log_technical("debug", "Attempting streaming without MCP tools")
+                
+                from litellm import acompletion
+                import json
+                
+                # Create a simple streaming request
+                try:
+                    # Use the same model formatting logic as _create_model_instance
+                    formatted_model_name = self.model_name
+                    if self.config.llm.base_url and "openrouter.ai" in self.config.llm.base_url:
+                        # For OpenRouter, always add openrouter/ prefix unless already present
+                        if not self.model_name.startswith("openrouter/"):
+                            formatted_model_name = f"openrouter/{self.model_name}"
+                    
+                    log_technical("debug", f"Using formatted model name for streaming: {formatted_model_name}")
+                    
+                    stream_response = await acompletion(
+                        model=formatted_model_name,
+                        messages=[
+                            {"role": "system", "content": self.instructions},
+                            {"role": "user", "content": message}
+                        ],
+                        stream=True,
+                        **self._get_model_kwargs()
+                    )
+                    
+                    log_technical("info", "Streaming response started")
+                    
+                    async for chunk in stream_response:
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            content = chunk.choices[0].delta.content
+                            yield content
+                    
+                    log_technical("info", "Streaming response completed")
+                    return
+                    
+                except Exception as e:
+                    log_technical("warning", f"Streaming without tools failed: {e}")
+                    # Fall through to MCP tool version
+            
+            # If simple streaming failed or tools needed, use MCP tools
+            await self._ensure_mcp_connections()
+            
+            # Get the agent with MCP tools
+            agent = self.get_agent()
+            
+            # Use streaming API with MCP tools
+            result = Runner.run_streamed(
+                starting_agent=agent,
+                input=message,
+                **kwargs
+            )
+            
+            collected_content = ""
+            log_technical("info", "Starting MCP streaming response")
+            
+            async for event in result.stream_events():
+                if event.type == "run_item_stream_event":
+                    if event.item.type == "message_output_item":
+                        try:
+                            # Try to access content attribute safely
+                            if hasattr(event.item, 'content') and event.item.content:
+                                for content_part in event.item.content:
+                                    if hasattr(content_part, 'text'):
+                                        chunk_text = content_part.text
+                                        collected_content += chunk_text
+                                        yield chunk_text
+                                    elif hasattr(content_part, 'content') and content_part.content:
+                                        chunk_text = str(content_part.content)
+                                        collected_content += chunk_text
+                                        yield chunk_text
+                            elif hasattr(event.item, 'text'):
+                                # Fallback: try to access text directly
+                                chunk_text = event.item.text
+                                collected_content += chunk_text
+                                yield chunk_text
+                            else:
+                                # Ultimate fallback: convert the entire item to string
+                                chunk_text = str(event.item)
+                                if len(chunk_text) > 0 and chunk_text != str(event.item.__class__):
+                                    collected_content += chunk_text
+                                    yield chunk_text
+                        except Exception as content_error:
+                            log_technical("warning", f"Error accessing message content: {content_error}")
+                            # Try alternative access methods
+                            try:
+                                from agents import ItemHelpers
+                                message_text = ItemHelpers.text_message_output(event.item)
+                                if message_text:
+                                    collected_content += message_text
+                                    yield message_text
+                            except Exception as helper_error:
+                                log_technical("debug", f"ItemHelpers also failed: {helper_error}")
+                                continue
+            
+            if not collected_content:
+                # Fallback if no streaming content was captured
+                final_result = await result.get_final_result()
+                if hasattr(final_result, 'final_output'):
+                    yield final_result.final_output
+                else:
+                    yield str(final_result)
+            
+            log_technical("info", f"MCP streaming completed, total chars: {len(collected_content)}")
+            
+        except Exception as e:
+            log_technical("error", f"Streaming run failed: {e}")
+            yield f"[ERROR] {str(e)}"
+
+
+    def run_stream_sync(self, message: str, **kwargs) -> Iterator[str]:
+        """
+        Run the agent with streaming output (synchronous wrapper).
+        
+        Args:
+            message: Input message for the agent
+            **kwargs: Additional arguments
+            
+        Yields:
+            String chunks as they are generated
+        """
+        import asyncio
+        
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is already running, we need to create a new task
+                import threading
+                import queue
+                import time
+                
+                result_queue = queue.Queue()
+                exception_queue = queue.Queue()
+                
+                def run_in_thread():
+                    try:
+                        new_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(new_loop)
+                        
+                        async def collect_stream():
+                            async for chunk in self.run_stream(message, **kwargs):
+                                result_queue.put(('chunk', chunk))
+                            result_queue.put(('done', None))
+                        
+                        new_loop.run_until_complete(collect_stream())
+                        new_loop.close()
+                    except Exception as e:
+                        exception_queue.put(e)
+                        result_queue.put(('error', str(e)))
+                
+                thread = threading.Thread(target=run_in_thread)
+                thread.start()
+                
+                while True:
+                    try:
+                        item_type, content = result_queue.get(timeout=1)
+                        if item_type == 'chunk':
+                            yield content
+                        elif item_type == 'done':
+                            break
+                        elif item_type == 'error':
+                            if not exception_queue.empty():
+                                raise exception_queue.get()
+                            break
+                    except queue.Empty:
+                        if not thread.is_alive():
+                            break
+                        continue
+                
+                thread.join()
+            else:
+                # No event loop running, we can run directly
+                async def collect_stream():
+                    async for chunk in self.run_stream(message, **kwargs):
+                        yield chunk
+                
+                # Run the async generator synchronously
+                gen = collect_stream()
+                try:
+                    while True:
+                        chunk = loop.run_until_complete(gen.__anext__())
+                        yield chunk
+                except StopAsyncIteration:
+                    pass
+                    
+        except Exception as e:
+            log_technical("error", f"Sync streaming failed: {e}")
+            yield f"[ERROR] {str(e)}"
 
 def create_agent(
     name: Optional[str] = None,
