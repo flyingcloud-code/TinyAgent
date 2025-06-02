@@ -18,9 +18,9 @@ mcp:
     - "filesystem"
     - "sequential-thinking"
     - "my-search"  # 启用SSE搜索服务器
-    - "fetch" 
+    #- "fetch" 
     # - "time"
-    # - "my-search"
+    - "my-search"
 
 logging:
   level: "INFO"

@@ -544,3 +544,264 @@ mcp:
 ---
 
 *本设计文档基于TinyAgent当前架构和实现状态编写，将随项目发展持续更新。* 
+
+## 11. 🚨 **Critical Intelligence Gap Analysis & Fix Epic**
+*Added: 2025-06-02*  
+*Priority: CRITICAL*  
+*Epic Status: IDENTIFIED*
+
+### 11.1 Critical Issue Identification
+
+**问题**: TinyAgent虽然技术栈完善（多模型LLM支持、MCP工具集成、配置管理等），但缺少核心智能能力，表现为：
+- 🚫 **无ReAct循环**: 缺少推理→行动→观察的智能决策循环
+- 🚫 **无工具智能**: 不知道何时和如何使用已集成的MCP工具
+- 🚫 **无对话记忆**: 无法维护对话历史和上下文
+- 🚫 **无任务规划**: 无法分解复杂任务为可执行步骤
+- 🚫 **无自主执行**: 只是被动回复，没有主动执行能力
+
+### 11.2 Root Cause Analysis
+
+#### 当前架构问题:
+```python
+# 当前实现 (问题):
+async def run(self, message: str, **kwargs) -> Any:
+    # 直接调用LLM，没有智能循环
+    result = await Runner.run(starting_agent=agent, input=message, **kwargs)
+    return result  # 一次性返回，无迭代推理
+```
+
+#### 缺失的智能层:
+```mermaid
+graph TD
+    CurrentFlow[当前流程: 用户输入 → LLM → 直接输出]
+    
+    MissingFlow[缺失的智能流程:]
+    MissingFlow --> TaskAnalysis[任务分析]
+    TaskAnalysis --> Planning[规划制定]
+    Planning --> ReActLoop{ReAct循环}
+    ReActLoop --> |推理| Reasoning[分析当前状态]
+    Reasoning --> |行动| Action[选择并执行工具]
+    Action --> |观察| Observation[评估执行结果]
+    Observation --> |继续?| ReActLoop
+    ReActLoop --> |完成| FinalOutput[最终输出]
+    
+    class CurrentFlow problemClass
+    class MissingFlow solutionClass
+```
+
+### 11.3 Intelligence Architecture Design
+
+#### 新的智能代理架构:
+```python
+class IntelligentAgent:
+    """智能代理核心类 - 实现完整ReAct循环"""
+    
+    def __init__(self, llm, tools, memory, planner):
+        self.llm = llm                    # LLM推理引擎
+        self.tools = tools                # MCP工具管理器
+        self.memory = memory              # 对话和任务记忆
+        self.planner = planner            # 任务规划器
+        self.max_iterations = 10          # 防止无限循环
+    
+    async def execute_task(self, user_input: str) -> str:
+        """执行完整的智能任务流程"""
+        # 1. 任务分析和规划
+        task_plan = await self.planner.analyze_and_plan(user_input)
+        
+        # 2. ReAct循环执行
+        for iteration in range(self.max_iterations):
+            # 推理 (Reasoning)
+            reasoning = await self.reason_about_current_state(task_plan)
+            
+            if reasoning.is_complete:
+                break
+                
+            # 行动 (Acting)
+            action_result = await self.take_action(reasoning.next_action)
+            
+            # 观察 (Observation)
+            observation = await self.observe_results(action_result)
+            
+            # 更新任务状态
+            task_plan.update_with_observation(observation)
+        
+        # 3. 整合最终结果
+        return await self.synthesize_final_result(task_plan)
+```
+
+#### 核心组件设计:
+
+1. **TaskPlanner** - 任务规划器
+```python
+class TaskPlanner:
+    async def analyze_and_plan(self, user_input: str) -> TaskPlan:
+        """分析用户需求并制定执行计划"""
+        
+    def identify_required_tools(self, task: str) -> List[str]:
+        """识别任务所需的工具"""
+        
+    def decompose_into_steps(self, task: str) -> List[TaskStep]:
+        """将复杂任务分解为步骤"""
+```
+
+2. **ConversationMemory** - 对话记忆
+```python
+class ConversationMemory:
+    def __init__(self):
+        self.conversation_history = []
+        self.task_context = {}
+        self.tool_usage_history = []
+    
+    def add_exchange(self, user_input: str, agent_response: str):
+        """添加对话记录"""
+    
+    def get_relevant_context(self, current_input: str) -> str:
+        """获取相关上下文"""
+```
+
+3. **ToolSelector** - 工具选择器
+```python
+class ToolSelector:
+    def __init__(self, available_tools: Dict[str, Any]):
+        self.tools = available_tools
+        
+    async def select_best_tool(self, task_step: TaskStep) -> str:
+        """基于任务步骤选择最合适的工具"""
+        
+    def can_handle_task(self, tool_name: str, task: str) -> bool:
+        """判断工具是否能处理特定任务"""
+```
+
+### 11.4 Implementation Epic
+
+#### **Epic: TinyAgent Intelligence Implementation**
+**Epic ID**: EPIC-001  
+**Priority**: P0 (Critical)  
+**Estimated Effort**: 2-3 weeks  
+**Dependencies**: Current MCP integration, LLM provider system
+
+#### Phase 1: Core Intelligence Framework (Week 1)
+- **Story 1.1**: 实现TaskPlanner组件
+  - 任务分析和分解逻辑
+  - 工具需求识别
+  - 执行步骤规划
+  
+- **Story 1.2**: 实现ConversationMemory组件
+  - 对话历史管理
+  - 上下文相关性计算
+  - 任务状态跟踪
+  
+- **Story 1.3**: 实现ToolSelector组件
+  - 基于任务的工具选择逻辑
+  - 工具能力映射
+  - 执行结果评估
+
+#### Phase 2: ReAct Loop Implementation (Week 2)
+- **Story 2.1**: 实现推理引擎 (Reasoning)
+  - 当前状态分析
+  - 下一步行动决策
+  - 完成状态判断
+  
+- **Story 2.2**: 实现行动执行器 (Acting)
+  - 工具调用管理
+  - 参数智能生成
+  - 执行状态监控
+  
+- **Story 2.3**: 实现观察器 (Observation)
+  - 结果质量评估
+  - 错误检测和处理
+  - 进度更新
+
+#### Phase 3: Integration & Testing (Week 3)
+- **Story 3.1**: 集成新智能架构到现有TinyAgent
+  - 保持向后兼容
+  - 配置系统集成
+  - 错误处理改进
+  
+- **Story 3.2**: 端到端测试和优化
+  - 复杂任务测试场景
+  - 性能优化
+  - 用户体验改进
+
+### 11.5 Success Metrics
+
+#### 核心能力指标:
+- ✅ **任务完成率**: 复杂任务的成功完成比例 (目标: >80%)
+- ✅ **工具使用智能**: 正确选择和使用工具的比例 (目标: >90%)
+- ✅ **对话连贯性**: 多轮对话的上下文保持能力 (目标: >85%)
+- ✅ **任务分解准确性**: 复杂任务正确分解的比例 (目标: >75%)
+
+#### 用户体验指标:
+- ✅ **响应质量**: 用户满意度评分 (目标: >4.0/5.0)
+- ✅ **执行效率**: 平均任务完成时间 (目标: <2分钟)
+- ✅ **错误恢复**: 错误后的自动恢复能力 (目标: >70%)
+
+### 11.6 Technical Implementation Plan
+
+#### 文件结构更新:
+```
+tinyagent/
+├── intelligence/              # 新增智能模块
+│   ├── __init__.py
+│   ├── planner.py            # 任务规划器
+│   ├── memory.py             # 对话记忆
+│   ├── reasoner.py           # 推理引擎
+│   ├── actor.py              # 行动执行器
+│   ├── observer.py           # 观察器
+│   └── selector.py           # 工具选择器
+├── core/
+│   ├── agent.py              # 增强现有Agent类
+│   └── intelligent_agent.py  # 新的智能代理类
+└── prompts/
+    ├── reasoning_prompts.txt  # 推理提示词
+    ├── planning_prompts.txt   # 规划提示词
+    └── reflection_prompts.txt # 反思提示词
+```
+
+#### 配置增强:
+```yaml
+# configs/profiles/development.yaml
+intelligence:
+  enabled: true
+  max_iterations: 10
+  reasoning_depth: 3
+  memory_retention: 100  # 保留最近100轮对话
+  
+  planner:
+    decomposition_strategy: "hierarchical"
+    tool_selection_strategy: "capability_based"
+  
+  memory:
+    context_window: 50
+    relevance_threshold: 0.7
+```
+
+### 11.7 Risk Mitigation
+
+| 风险 | 概率 | 影响 | 缓解措施 |
+|------|------|------|----------|
+| 推理循环无限迭代 | 中 | 高 | 实现最大迭代限制和智能终止条件 |
+| 工具选择错误 | 中 | 中 | 多层验证和回退机制 |
+| 性能影响 | 高 | 中 | 异步执行和缓存优化 |
+| 向后兼容性破坏 | 低 | 高 | 保持现有API，新功能可选启用 |
+
+### 11.8 Next Steps
+
+1. **立即行动** (本周):
+   - 创建intelligence模块框架
+   - 实现基础TaskPlanner类
+   - 编写推理提示词模板
+
+2. **短期目标** (2周内):
+   - 完成Phase 1和Phase 2开发
+   - 实现基本的ReAct循环
+
+3. **中期目标** (1月内):
+   - 完成完整智能架构集成
+   - 通过所有核心能力测试
+
+**这个Epic将彻底解决TinyAgent的智能缺失问题，将其从简单的LLM包装器转变为真正的智能代理。**
+
+---
+
+*这个Epic和实施计划解决了TinyAgent最关键的架构缺陷，是项目成功的关键里程碑。* 
