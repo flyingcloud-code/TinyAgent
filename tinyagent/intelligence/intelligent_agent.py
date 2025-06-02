@@ -281,6 +281,7 @@ class IntelligentAgent:
             reasoning_context = {
                 "task_plan": task_plan,
                 "selected_tools": tool_selection.selected_tools,
+                "available_tools": available_tools,  # Add available tools to context
                 "conversation_context": self.conversation_memory.get_relevant_context(message),
                 "original_message": message,
                 "enhanced_tool_context": enhanced_context,
@@ -382,23 +383,63 @@ class IntelligentAgent:
         """Get list of available tools from various sources"""
         available_tools = []
         
-        # Add built-in action executor tools
-        builtin_tools = [
-            {"name": "search", "description": "Search for information", "type": "builtin"},
-            {"name": "analyze", "description": "Analyze data or content", "type": "builtin"},
-            {"name": "create", "description": "Create content or files", "type": "builtin"},
-            {"name": "synthesize", "description": "Combine multiple inputs", "type": "builtin"},
-            {"name": "validate", "description": "Validate answers or results", "type": "builtin"}
-        ]
-        available_tools.extend(builtin_tools)
+        # Add registered MCP tools first (these are the real tools)
+        if hasattr(self, '_mcp_tools') and self._mcp_tools:
+            for tool in self._mcp_tools:
+                available_tools.append({
+                    "name": tool.get('name', 'unknown'),
+                    "description": tool.get('description', 'MCP tool'),
+                    "type": "mcp",
+                    "server": tool.get('server', 'unknown'),
+                    "category": tool.get('category', 'unknown')
+                })
         
-        # Add registered tools from action executor
+        # Add tools from tool cache if available
+        if self.tool_cache and self.mcp_context_builder:
+            try:
+                # Get all cached tools
+                cached_tools = {}
+                for server_name in ['filesystem', 'sequential-thinking', 'fetch']:  # Known servers
+                    server_tools = self.tool_cache.get_cached_tools(server_name)
+                    if server_tools:
+                        cached_tools[server_name] = server_tools
+                
+                # Add cached tools to available tools (avoid duplicates)
+                existing_tool_names = {tool['name'] for tool in available_tools}
+                for server_name, tool_list in cached_tools.items():
+                    for tool_info in tool_list:
+                        if tool_info.name not in existing_tool_names:
+                            available_tools.append({
+                                "name": tool_info.name,
+                                "description": tool_info.description,
+                                "type": "mcp",
+                                "server": tool_info.server_name,
+                                "category": tool_info.category
+                            })
+                            existing_tool_names.add(tool_info.name)
+            except Exception as e:
+                logger.warning(f"Error getting tools from cache: {e}")
+        
+        # Add registered tools from action executor if they're not already included
+        existing_tool_names = {tool['name'] for tool in available_tools}
         for tool_name in self.action_executor.tool_registry.keys():
-            available_tools.append({
-                "name": tool_name,
-                "description": f"Registered tool: {tool_name}",
-                "type": "registered"
-            })
+            if tool_name not in existing_tool_names:
+                available_tools.append({
+                    "name": tool_name,
+                    "description": f"Registered tool: {tool_name}",
+                    "type": "registered"
+                })
+        
+        # Only add built-in tools if no real tools are available
+        if not available_tools:
+            builtin_tools = [
+                {"name": "search", "description": "Search for information", "type": "builtin"},
+                {"name": "analyze", "description": "Analyze data or content", "type": "builtin"},
+                {"name": "create", "description": "Create content or files", "type": "builtin"},
+                {"name": "synthesize", "description": "Combine multiple inputs", "type": "builtin"},
+                {"name": "validate", "description": "Validate answers or results", "type": "builtin"}
+            ]
+            available_tools.extend(builtin_tools)
         
         return available_tools
     
@@ -406,63 +447,111 @@ class IntelligentAgent:
         """Register MCP tools with the intelligent agent and update tool cache"""
         logger.info(f"Registering {len(mcp_tools)} MCP tools")
         
+        # Check if we already have tools registered to prevent duplicates
+        if hasattr(self, '_mcp_tools_registered') and self._mcp_tools_registered:
+            logger.debug(f"Tools already registered, checking for new tools only")
+            # Check for new tools not already registered
+            existing_tool_names = {tool.get('name') for tool in self._mcp_tools}
+            new_tools = [tool for tool in mcp_tools if tool.get('name') not in existing_tool_names]
+            if not new_tools:
+                logger.debug("No new tools to register, skipping duplicate registration")
+                return
+            mcp_tools = new_tools  # Only register new tools
+        
+        # Initialize registered tools list if not exists
+        if not hasattr(self, '_mcp_tools'):
+            self._mcp_tools = []
+        
+        # Group tools by server to avoid repeated cache operations
+        tools_by_server = {}
+        registered_count = 0
+        
         for tool in mcp_tools:
             tool_name = tool.get('name', 'unknown')
             description = tool.get('description', 'MCP tool')
             server_name = tool.get('server', 'unknown')
             
-            # Register with tool selector
-            self.tool_selector.add_tool_capability(
-                tool_name=tool_name,
-                capabilities=[description],
-                server_name=server_name,
-                reliability_score=0.8  # Default reliability for MCP tools
-            )
+            # Check if this specific tool is already registered
+            existing_tool_names = {t.get('name') for t in self._mcp_tools}
+            if tool_name in existing_tool_names:
+                logger.debug(f"Tool {tool_name} already registered, skipping")
+                continue
             
-            # Register execution function if available
-            if 'function' in tool:
+            # Register with tool selector only if not already registered
+            if not self.tool_selector.has_tool(tool_name):
+                self.tool_selector.add_tool_capability(
+                    tool_name=tool_name,
+                    capabilities=[description],
+                    server_name=server_name,
+                    reliability_score=0.8  # Default reliability for MCP tools
+                )
+            
+            # Register execution function if available and not already registered
+            if 'function' in tool and tool_name not in self.action_executor.tool_registry:
                 self.action_executor.register_tool(tool_name, tool['function'])
             
-            # Update tool cache if available
-            if self.tool_cache and self.mcp_context_builder:
-                try:
-                    # Cache this tool information
-                    from ..mcp.cache import ToolInfo, PerformanceMetrics
-                    from datetime import datetime
-                    
-                    tool_info = ToolInfo(
-                        name=tool_name,
-                        description=description,
-                        server_name=server_name,
-                        schema=tool.get('schema', {}),
-                        category=tool.get('category', 'unknown'),
-                        last_updated=datetime.now(),
-                        performance_metrics=PerformanceMetrics(
-                            success_rate=1.0,
-                            avg_response_time=0.0,
-                            total_calls=0,
-                            last_call_time=None
-                        )
-                    )
-                    
-                    # Add to cache
-                    cached_tools = self.tool_cache.get_cached_tools(server_name) or []
-                    cached_tools.append(tool_info)
-                    self.tool_cache.cache_server_tools(server_name, cached_tools)
-                    
-                    # Invalidate context cache to force rebuild
-                    self._tool_context_cache_valid = False
-                    
-                    logger.debug(f"Updated tool cache for: {tool_name}")
-                except Exception as e:
-                    logger.warning(f"Failed to update tool cache for {tool_name}: {e}")
+            # Group tools by server for batch caching
+            if server_name not in tools_by_server:
+                tools_by_server[server_name] = []
+            tools_by_server[server_name].append(tool)
             
             logger.info(f"Registered MCP tool: {tool_name} from server: {server_name}")
             
             # Store MCP tools when registered
             self._mcp_tools.append(tool)
+            registered_count += 1
+        
+        # Mark as registered to prevent future duplicate registrations
+        self._mcp_tools_registered = True
+        
+        # Only update cache if we actually registered new tools
+        if registered_count == 0:
+            logger.debug("No new tools were registered, skipping cache update")
+            return
+        
+        # Update tool cache once per server (batch operation)
+        if self.tool_cache and self.mcp_context_builder:
+            try:
+                from ..mcp.cache import ToolInfo, PerformanceMetrics
+                from datetime import datetime
+                
+                for server_name, server_tools in tools_by_server.items():
+                    # Check if tools are already cached to avoid redundant operations
+                    existing_cached_tools = self.tool_cache.get_cached_tools(server_name)
+                    if existing_cached_tools and len(existing_cached_tools) >= len(server_tools):
+                        logger.debug(f"Tools for {server_name} already cached, skipping cache update")
+                        continue
+                    
+                    # Create ToolInfo objects for this server
+                    tool_infos = []
+                    for tool in server_tools:
+                        tool_info = ToolInfo(
+                            name=tool.get('name', 'unknown'),
+                            description=tool.get('description', 'MCP tool'),
+                            server_name=server_name,
+                            schema=tool.get('schema', {}),
+                            category=tool.get('category', 'unknown'),
+                            last_updated=datetime.now(),
+                            performance_metrics=PerformanceMetrics(
+                                success_rate=1.0,
+                                avg_response_time=0.0,
+                                total_calls=0,
+                                last_call_time=None
+                            )
+                        )
+                        tool_infos.append(tool_info)
+                    
+                    # Cache all tools for this server at once
+                    self.tool_cache.cache_server_tools(server_name, tool_infos)
+                    logger.debug(f"Updated tool cache for server: {server_name} with {len(tool_infos)} tools")
+                
+                # Invalidate context cache to force rebuild
+                self._tool_context_cache_valid = False
+                
+            except Exception as e:
+                logger.warning(f"Failed to update tool cache: {e}")
             
-        logger.info(f"Completed registering {len(mcp_tools)} MCP tools")
+        logger.info(f"Completed registering {registered_count} new MCP tools from {len(tools_by_server)} servers")
     
     def get_conversation_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Get conversation history from memory"""

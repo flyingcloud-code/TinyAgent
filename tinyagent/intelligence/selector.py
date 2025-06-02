@@ -807,4 +807,16 @@ Provide your selection with reasoning."""
         Returns:
             Tool usage and selection statistics
         """
-        return self.get_tool_statistics() 
+        return self.get_tool_statistics()
+
+    def has_tool(self, tool_name: str) -> bool:
+        """
+        Check if a tool is already registered
+        
+        Args:
+            tool_name: Name of the tool to check
+            
+        Returns:
+            True if tool is registered, False otherwise
+        """
+        return tool_name in self.tool_metadata or tool_name in self.available_tools 

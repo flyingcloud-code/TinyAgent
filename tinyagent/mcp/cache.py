@@ -190,9 +190,25 @@ class MCPToolCache:
             server_name: Name of the MCP server
             tools: List of tools to cache
         """
+        # Check if we already have valid cached tools for this server
+        if self.is_cache_valid(server_name):
+            existing_tools = self._tool_metadata.get(server_name, [])
+            if len(existing_tools) == len(tools):
+                # Same number of tools, likely already cached
+                self.logger.debug(f"Server {server_name} tools already cached ({len(tools)} tools)")
+                return
+        
         # Enforce cache size limits
         if len(tools) > self.max_cache_size:
-            self.logger.warning(f"Server {server_name} has {len(tools)} tools, limiting to {self.max_cache_size}")
+            # Only log this warning once per server per session
+            cache_key = f"size_warning_{server_name}"
+            if not hasattr(self, '_logged_warnings'):
+                self._logged_warnings = set()
+            
+            if cache_key not in self._logged_warnings:
+                self.logger.warning(f"Server {server_name} has {len(tools)} tools, limiting to {self.max_cache_size}")
+                self._logged_warnings.add(cache_key)
+            
             tools = tools[:self.max_cache_size]
         
         # Cache the tools
@@ -204,11 +220,14 @@ class MCPToolCache:
             self._server_status[server_name].tools_count = len(tools)
             self._server_status[server_name].last_ping_time = datetime.now()
         
-        self.logger.info(f"Cached {len(tools)} tools for server {server_name}")
+        self.logger.debug(f"Cached {len(tools)} tools for server {server_name}")
         
         # Persist to disk if enabled
         if self.persist_cache:
-            self._save_cache_to_disk()
+            try:
+                self._save_cache_to_disk()
+            except Exception as e:
+                self.logger.warning(f"Failed to persist cache: {e}")
     
     def get_cached_tools(self, server_name: str) -> Optional[List[ToolInfo]]:
         """

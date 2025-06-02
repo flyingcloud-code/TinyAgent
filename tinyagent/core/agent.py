@@ -1046,13 +1046,20 @@ class TinyAgent:
                         log_technical("info", "No valid cache found, initializing MCP servers...")
                         # Temporarily suppress repetitive tool discovery logs
                         filesystem_logger = logging.getLogger('agents.mcp')
-                        old_level = filesystem_logger.level
-                        filesystem_logger.setLevel(logging.WARNING)  # Suppress INFO/DEBUG messages
+                        cache_logger = logging.getLogger('tinyagent.mcp.cache')
+                        old_filesystem_level = filesystem_logger.level
+                        old_cache_level = cache_logger.level
+                        
+                        # Suppress INFO/DEBUG messages during initialization
+                        filesystem_logger.setLevel(logging.WARNING)
+                        cache_logger.setLevel(logging.WARNING)
                         
                         try:
                             cached_tools = await self.mcp_manager.initialize_with_caching()
                         finally:
-                            filesystem_logger.setLevel(old_level)  # Restore original level
+                            # Restore original levels
+                            filesystem_logger.setLevel(old_filesystem_level)
+                            cache_logger.setLevel(old_cache_level)
                     
                     # Get all tools from cache
                     all_tools = []
@@ -1075,11 +1082,16 @@ class TinyAgent:
                                     }
                                     all_tools.append(tool_dict)
                     
-                    # Register tools with intelligent agent
+                    # Register tools with intelligent agent (only if we have tools and they're not already registered)
                     if all_tools:
-                        intelligent_agent.register_mcp_tools(all_tools)
-                        log_technical("info", f"Enhanced registration: {len(all_tools)} tools from {total_servers} servers")
-                        log_agent(f"Registered {len(all_tools)} MCP tools with enhanced context")
+                        # Check if tools are already registered to avoid duplicate registration
+                        if not hasattr(intelligent_agent, '_mcp_tools_registered') or not intelligent_agent._mcp_tools_registered:
+                            intelligent_agent.register_mcp_tools(all_tools)
+                            # Don't set the flag here - let register_mcp_tools handle it internally
+                            log_technical("info", f"Enhanced registration: {len(all_tools)} tools from {total_servers} servers")
+                            log_agent(f"Registered {len(all_tools)} MCP tools with enhanced context")
+                        else:
+                            log_technical("debug", f"Tools already registered, skipping duplicate registration")
                         
                         # Build enhanced tool context using context builder (only if not already built)
                         if (hasattr(intelligent_agent, 'mcp_context_builder') and 
@@ -1610,24 +1622,40 @@ class TinyAgent:
     def get_available_tools(self) -> List[str]:
         """
         Get list of available tools from MCP servers.
-        This is a synchronous version that returns cached tools if connections exist.
+        This is a synchronous version that returns cached tools if available.
         
         Returns:
             List of tool names
         """
-        # If connections are not initialized, return empty list
-        if not self._connections_initialized or not self._persistent_connections:
-            return []
-        
         tools = []
-        for server_name, connection in self._persistent_connections.items():
+        
+        # Try to get tools from enhanced MCP manager cache if available
+        if (hasattr(self, 'mcp_manager') and self.mcp_manager and 
+            hasattr(self.mcp_manager, 'tool_cache') and self.mcp_manager.tool_cache):
             try:
-                # For connected servers, we should have cached tool info
-                # Since this is sync method, we'll use a placeholder format
-                tools.append(f"{server_name}_tools_available")
+                # Get cached tools from all servers
+                for server_name in self.config.mcp.servers.keys():
+                    if self.config.mcp.servers[server_name].enabled:
+                        cached_server_tools = self.mcp_manager.tool_cache.get_cached_tools(server_name)
+                        if cached_server_tools:
+                            for tool_info in cached_server_tools:
+                                tools.append(tool_info.name)
+                
+                if tools:
+                    log_technical("debug", f"Retrieved {len(tools)} tools from cache: {tools}")
+                    return tools
             except Exception as e:
-                log_technical("warning", f"Error getting tools from {server_name}: {e}")
-                continue
+                log_technical("warning", f"Error getting tools from cache: {e}")
+        
+        # If connections are initialized, try to get tools from connections
+        if self._connections_initialized and self._persistent_connections:
+            for server_name, connection in self._persistent_connections.items():
+                try:
+                    # Return a placeholder that indicates tools are available but need async call
+                    tools.append(f"{server_name}_connection_available")
+                except Exception as e:
+                    log_technical("warning", f"Error checking connection for {server_name}: {e}")
+                    continue
         
         return tools
     
@@ -1638,26 +1666,49 @@ class TinyAgent:
         Returns:
             List of tool names
         """
-        # Ensure connections are established
-        await self._ensure_mcp_connections()
-        
         tools = []
-        for server_name, connection in self._persistent_connections.items():
+        
+        # First try to get tools from enhanced MCP manager cache
+        if (hasattr(self, 'mcp_manager') and self.mcp_manager and 
+            hasattr(self.mcp_manager, 'tool_cache') and self.mcp_manager.tool_cache):
             try:
-                # Get tools from the connection
-                if hasattr(connection, 'list_tools'):
-                    server_tools = await connection.list_tools()
-                    if hasattr(server_tools, 'tools'):
-                        for tool in server_tools.tools:
-                            tools.append(f"{server_name}:{tool.name}")
-                    else:
-                        tools.append(f"{server_name}:unknown_tools")
-                else:
-                    tools.append(f"{server_name}:no_list_tools_method")
+                # Get cached tools from all servers
+                for server_name in self.config.mcp.servers.keys():
+                    if self.config.mcp.servers[server_name].enabled:
+                        cached_server_tools = self.mcp_manager.tool_cache.get_cached_tools(server_name)
+                        if cached_server_tools:
+                            for tool_info in cached_server_tools:
+                                tools.append(tool_info.name)
+                
+                if tools:
+                    log_technical("debug", f"Retrieved {len(tools)} tools from cache (async): {tools}")
+                    return tools
             except Exception as e:
-                log_technical("warning", f"Error getting tools from {server_name}: {e}")
-                tools.append(f"{server_name}:error")
-                continue
+                log_technical("warning", f"Error getting tools from cache (async): {e}")
+        
+        # If no cached tools, ensure connections and discover tools
+        try:
+            # Ensure connections are established
+            await self._ensure_mcp_connections()
+            
+            # Get tools from the connections
+            for server_name, connection in self._persistent_connections.items():
+                try:
+                    # Get tools from the connection
+                    if hasattr(connection, 'list_tools'):
+                        server_tools = await connection.list_tools()
+                        if hasattr(server_tools, 'tools'):
+                            for tool in server_tools.tools:
+                                tools.append(tool.name)
+                        else:
+                            log_technical("warning", f"Server {server_name} tools response format unexpected")
+                    else:
+                        log_technical("warning", f"Server {server_name} does not support list_tools")
+                except Exception as e:
+                    log_technical("warning", f"Error getting tools from {server_name}: {e}")
+                    continue
+        except Exception as e:
+            log_technical("error", f"Error in async tool discovery: {e}")
         
         return tools
     

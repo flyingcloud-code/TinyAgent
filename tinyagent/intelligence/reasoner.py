@@ -319,17 +319,34 @@ class ReasoningEngine:
         goal = context.get("goal", "")
         steps_taken = context.get("steps_taken", [])
         last_observation = context.get("last_observation", "")
+        available_actions = context.get("available_actions", [])
+        
+        # Include available tools information if present
+        available_tools_info = ""
+        if "available_tools" in context:
+            tools = context["available_tools"]
+            if tools:
+                available_tools_info = f"\nAvailable Tools ({len(tools)}):\n"
+                for tool in tools:
+                    tool_name = tool.get('name', 'unknown')
+                    tool_desc = tool.get('description', 'No description')
+                    tool_server = tool.get('server', 'unknown')
+                    available_tools_info += f"  • {tool_name}: {tool_desc} (from {tool_server})\n"
         
         prompt = f"""
 You are in the THINKING phase of a ReAct reasoning loop. Your goal is: {goal}
 
 Steps taken so far: {len(steps_taken)}
 Last observation: {last_observation}
+{available_tools_info}
+Available actions: {', '.join(available_actions)}
 
 Analyze the current situation and determine:
 1. What progress has been made toward the goal?
 2. What is the next logical action to take?
 3. Is the goal already achieved?
+
+If the user is asking about tools or capabilities, refer to the actual available tools listed above.
 
 Respond with your analysis and reasoning.
 """
