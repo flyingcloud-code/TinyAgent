@@ -67,8 +67,7 @@ from ..core.logging import (
 
 # Import intelligence components
 try:
-    from ..intelligence import IntelligentAgent, IntelligentAgentConfig
-    INTELLIGENCE_AVAILABLE = True
+    from ..intelligence import IntelligentAgent, IntelligentAgentConfig, INTELLIGENCE_AVAILABLE
 except ImportError as e:
     logging.warning(f"Intelligence components not available: {e}")
     INTELLIGENCE_AVAILABLE = False
@@ -167,365 +166,240 @@ class SimpleResult:
 class MCPToolCallLogger:
     """Custom wrapper to log MCP tool calls using enhanced logging"""
     
-    def __init__(self, original_agent, server_name_map=None, use_streaming=True):
+    def __init__(self, original_agent, server_name_map=None, use_streaming=True, verbose_tracing=False):
         self.original_agent = original_agent
         self.server_name_map = server_name_map or {}
         self.call_count = 0
         self.use_streaming = use_streaming
+        self.verbose_tracing = verbose_tracing
         
     def __getattr__(self, name):
-        """Delegate all attributes to the original agent"""
         return getattr(self.original_agent, name)
     
     def _infer_server_name(self, tool_name: str, event_item) -> str:
-        """Infer server name from tool name and event item attributes"""
-        # Method 1: Try to get server name from event item attributes
-        try:
-            if hasattr(event_item, 'server_name'):
-                return event_item.server_name
-            elif hasattr(event_item, 'mcp_server'):
-                return getattr(event_item.mcp_server, 'name', 'unknown')
-            elif hasattr(event_item, 'tool_call') and hasattr(event_item.tool_call, 'server'):
-                return event_item.tool_call.server
-        except Exception:
-            pass
+        """Infer server name from tool name or event item"""
+        # Check explicit mapping first
+        if tool_name in self.server_name_map:
+            return self.server_name_map[tool_name]
         
-        # Method 2: Infer from tool name patterns
+        # Try to extract from event item if available
+        if hasattr(event_item, 'server') and event_item.server:
+            return str(event_item.server)
+        elif hasattr(event_item, 'metadata') and isinstance(event_item.metadata, dict):
+            server = event_item.metadata.get('server')
+            if server:
+                return str(server)
+        
+        # Infer from tool name patterns
         tool_name_lower = tool_name.lower()
-        
-        # Filesystem patterns
-        if any(pattern in tool_name_lower for pattern in ['filesystem', 'file', 'read', 'write', 'create', 'delete', 'list']):
-            return "filesystem"
-        
-        # Search patterns  
-        elif any(pattern in tool_name_lower for pattern in ['search', 'google', 'web', 'fetch', 'get_web']):
-            return "my-search"
-        
-        # Sequential thinking patterns
-        elif any(pattern in tool_name_lower for pattern in ['thinking', 'sequential', 'think']):
-            return "sequential-thinking"
-        
-        # Fetch patterns
-        elif any(pattern in tool_name_lower for pattern in ['fetch', 'http', 'request', 'url']):
-            return "fetch"
-        
-        # Method 3: Check if server name is in our server mapping
-        if self.server_name_map:
-            for server_name in self.server_name_map.keys():
-                if server_name.lower() in tool_name_lower:
-                    return server_name
-        
-        return "unknown"
+        if any(fs_tool in tool_name_lower for fs_tool in ['file', 'read', 'write', 'directory', 'create']):
+            return 'filesystem'
+        elif any(web_tool in tool_name_lower for web_tool in ['fetch', 'http', 'url', 'search']):
+            return 'fetch'  
+        elif any(think_tool in tool_name_lower for think_tool in ['sequential', 'thinking', 'analyze']):
+            return 'sequential_thinking'
+        else:
+            return 'unknown'
     
+    def _format_tool_params(self, params) -> str:
+        """Format tool parameters for display"""
+        if not params:
+            return "无参数"
+        
+        if isinstance(params, dict):
+            formatted_params = []
+            for key, value in params.items():
+                if isinstance(value, str) and len(value) > 100:
+                    formatted_params.append(f"{key}: {value[:100]}...")
+                else:
+                    formatted_params.append(f"{key}: {value}")
+            return ", ".join(formatted_params)
+        else:
+            return str(params)[:200] + "..." if len(str(params)) > 200 else str(params)
+    
+    def _format_tool_result(self, result) -> str:
+        """Format tool result for display"""
+        if not result:
+            return "无结果"
+        
+        if isinstance(result, dict):
+            if 'content' in result:
+                content = result['content']
+                if isinstance(content, str) and len(content) > 200:
+                    return f"内容: {content[:200]}..."
+                else:
+                    return f"内容: {content}"
+            elif 'data' in result:
+                return f"数据: {str(result['data'])[:200]}..."
+            else:
+                return str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
+        elif isinstance(result, str):
+            return result[:200] + "..." if len(result) > 200 else result
+        else:
+            return str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
+
     async def run(self, input_data, **kwargs):
-        """Override run method to log tool calls with enhanced logging"""
-        log_agent("Starting task execution...")
-        log_technical("info", f"Agent run started with input: {str(input_data)[:200]}...")
+        """Run the original agent with enhanced tool call logging"""
+        if self.use_streaming and self.verbose_tracing:
+            return self._run_with_streaming_tool_logging(input_data, **kwargs)
+        else:
+            return await self._run_with_tool_logging(input_data, **kwargs)
+
+    def _run_with_streaming_tool_logging(self, input_data, **kwargs):
+        """Run with streaming and detailed tool call logging"""
+        
+        async def _collect_events():
+            tool_calls = {}
+            
+            try:
+                # 🎯 启动消息
+                if self.verbose_tracing:
+                    print("\n" + "="*80)
+                    print("🤖 TinyAgent 智能工具执行开始")
+                    print("="*80)
+                    print(f"📝 用户输入: {input_data}")
+                    print("-"*80)
+                
+                async for chunk in self.original_agent.run_stream(input_data, **kwargs):
+                    # Check if chunk contains events
+                    if hasattr(chunk, 'type'):
+                        if chunk.type == 'tool_call':
+                            self._handle_tool_call_event(chunk, tool_calls)
+                        elif chunk.type == 'tool_result':
+                            self._handle_tool_result_event(chunk, tool_calls)
+                    
+                    yield chunk
+                
+                # 🎯 完成消息  
+                if self.verbose_tracing and tool_calls:
+                    self._log_tool_summary(tool_calls)
+                    
+            except Exception as e:
+                if self.verbose_tracing:
+                    print(f"\n❌ 执行过程中发生错误: {e}")
+                    print("="*80)
+                raise
+        
+        return _collect_events()
+
+    def _handle_tool_call_event(self, event, tool_calls):
+        """Handle tool call events with detailed Chinese logging"""
+        try:
+            tool_name = getattr(event, 'tool_name', 'unknown_tool')
+            tool_id = getattr(event, 'tool_call_id', f'call_{len(tool_calls) + 1}')
+            params = getattr(event, 'arguments', {})
+            
+            if self.verbose_tracing:
+                self.call_count += 1
+                server_name = self._infer_server_name(tool_name, event)
+                
+                print(f"\n🔧 工具调用 #{self.call_count}")
+                print(f"   📛 工具名称: {tool_name}")
+                print(f"   🖥️  服务器: {server_name}")
+                print(f"   📋 参数: {self._format_tool_params(params)}")
+                print(f"   ⏱️  开始时间: {datetime.now().strftime('%H:%M:%S')}")
+                print(f"   🆔 调用ID: {tool_id}")
+                
+            tool_calls[tool_id] = {
+                'name': tool_name,
+                'params': params,
+                'start_time': time.time(),
+                'server': self._infer_server_name(tool_name, event)
+            }
+            
+        except Exception as e:
+            if self.verbose_tracing:
+                print(f"   ⚠️ 工具调用事件处理错误: {e}")
+
+    def _handle_tool_result_event(self, event, tool_calls):
+        """Handle tool result events with detailed Chinese logging"""
+        try:
+            tool_call_id = getattr(event, 'tool_call_id', None)
+            result = getattr(event, 'result', None)
+            is_error = getattr(event, 'is_error', False)
+            
+            if tool_call_id in tool_calls:
+                tool_info = tool_calls[tool_call_id]
+                duration = time.time() - tool_info['start_time']
+                
+                if self.verbose_tracing:
+                    if is_error:
+                        print(f"   ❌ 执行失败: {result}")
+                        print(f"   ⏱️  耗时: {duration:.2f}秒")
+                        
+                        # 更新全局统计
+                        _tool_call_stats['failed_calls'] += 1
+                    else:
+                        print(f"   ✅ 执行成功!")
+                        print(f"   📊 结果: {self._format_tool_result(result)}")
+                        print(f"   ⏱️  耗时: {duration:.2f}秒")
+                        
+                        # 更新全局统计
+                        _tool_call_stats['successful_calls'] += 1
+                    
+                    _tool_call_stats['total_calls'] += 1
+                    _tool_call_stats['total_duration'] += duration
+                    print("-"*60)
+                
+                # Update tool call info
+                tool_info['result'] = result
+                tool_info['duration'] = duration
+                tool_info['success'] = not is_error
+                
+        except Exception as e:
+            if self.verbose_tracing:
+                print(f"   ⚠️ 工具结果事件处理错误: {e}")
+
+    def _log_tool_summary(self, tool_calls):
+        """Log summary of all tool calls"""
+        if not tool_calls:
+            return
+            
+        successful = sum(1 for call in tool_calls.values() if call.get('success', False))
+        total = len(tool_calls)
+        total_time = sum(call.get('duration', 0) for call in tool_calls.values())
+        
+        print(f"\n📈 工具调用总结")
+        print(f"   📊 总调用次数: {total}")
+        print(f"   ✅ 成功次数: {successful}")
+        print(f"   ❌ 失败次数: {total - successful}")
+        print(f"   📈 成功率: {(successful/total*100):.1f}%")
+        print(f"   ⏱️  总耗时: {total_time:.2f}秒")
+        
+        if total > 0:
+            print(f"   ⚡ 平均耗时: {total_time/total:.2f}秒")
+        
+        print("="*80)
+
+    async def _run_with_tool_logging(self, input_data, **kwargs):
+        """Run with basic tool logging (non-streaming)"""
         start_time = time.time()
         
+        if self.verbose_tracing:
+            print("\n" + "="*80)
+            print("🤖 TinyAgent 执行开始")
+            print("="*80)
+            print(f"📝 用户输入: {input_data}")
+            print("-"*80)
+        
         try:
-            if self.use_streaming:
-                # Use streaming API with tool call logging
-                result = await self._run_with_tool_logging(input_data, **kwargs)
-            else:
-                # Use non-streaming API
-                result = await Runner.run(
-                    starting_agent=self.original_agent,
-                    input=input_data,
-                    **kwargs
-                )
+            result = await self.original_agent.run(input_data, **kwargs)
             
             duration = time.time() - start_time
-            log_agent(f"Task completed successfully in {duration:.1f}s")
-            log_technical("info", f"Agent run completed in {duration:.2f}s")
-            
-            # Log final statistics
-            log_tool_call_stats()
+            if self.verbose_tracing:
+                print(f"\n✅ 执行完成!")
+                print(f"⏱️  总耗时: {duration:.2f}秒")
+                print("="*80)
             
             return result
             
         except Exception as e:
             duration = time.time() - start_time
-            log_user(f"[ERROR] Task failed: {str(e)}")
-            log_technical("error", f"Agent run failed after 0.00s: {e}")
-            
-            # Log final statistics even on failure
-            log_tool_call_stats()
-            
+            if self.verbose_tracing:
+                print(f"\n❌ 执行失败: {e}")
+                print(f"⏱️  耗时: {duration:.2f}秒")
+                print("="*80)
             raise
-    
-    async def _run_with_tool_logging(self, input_data, **kwargs):
-        """Run the agent with tool call interception using enhanced logging"""
-        # We'll use the streaming API to capture tool calls
-        
-        # Filter out parameters that Runner.run_streamed doesn't accept
-        filtered_kwargs = {}
-        supported_params = ['max_turns', 'response_format', 'temperature', 'max_tokens']
-        for key, value in kwargs.items():
-            if key in supported_params:
-                filtered_kwargs[key] = value
-        
-        result = Runner.run_streamed(
-            starting_agent=self.original_agent,
-            input=input_data,
-            **filtered_kwargs
-        )
-        
-        tool_call_sequence = 0
-        current_tool_call_start = None
-        current_tool_info = {}  # Store current tool call details
-        collected_responses = []
-        
-        async for event in result.stream_events():
-            # Ignore raw response events
-            if event.type == "raw_response_event":
-                continue
-            elif event.type == "run_item_stream_event":
-                if event.item.type == "tool_call_item":
-                    # Tool call started
-                    tool_call_sequence += 1
-                    current_tool_call_start = time.time()
-                    
-                    # Extract tool details with improved robustness
-                    tool_name = "unknown"
-                    server_name = "unknown"
-                    tool_input = "N/A"
-                    
-                    try:
-                        # Log the raw item structure for debugging
-                        log_technical("info", f"Tool call item type: {type(event.item)}")
-                        log_technical("info", f"Tool call item attributes: {dir(event.item)}")
-                        
-                        # Method 1: Try to extract from raw_item (most likely to work)
-                        if hasattr(event.item, 'raw_item') and event.item.raw_item:
-                            raw_item = event.item.raw_item
-                            log_technical("info", f"Found raw_item: {type(raw_item)}")
-                            log_technical("info", f"Raw item attributes: {dir(raw_item)}")
-                            
-                            # Try to extract function name from raw_item
-                            if hasattr(raw_item, 'function') and raw_item.function:
-                                tool_name = raw_item.function.name or "unknown"
-                                if hasattr(raw_item.function, 'arguments') and raw_item.function.arguments:
-                                    tool_input = str(raw_item.function.arguments)
-                                    # Truncate long inputs for logging
-                                    if len(tool_input) > 200:
-                                        tool_input = tool_input[:200] + "... (truncated)"
-                                log_technical("info", f"Extracted from raw_item.function.name: {tool_name}")
-                            elif hasattr(raw_item, 'name'):
-                                tool_name = raw_item.name or "unknown"
-                                log_technical("info", f"Extracted from raw_item.name: {tool_name}")
-                            elif hasattr(raw_item, 'tool_call') and raw_item.tool_call:
-                                tool_call = raw_item.tool_call
-                                if hasattr(tool_call, 'function') and tool_call.function:
-                                    tool_name = tool_call.function.name or "unknown"
-                                    log_technical("info", f"Extracted from raw_item.tool_call.function.name: {tool_name}")
-                        
-                        # Method 2: Try to extract from tool_call attribute (fallback)
-                        elif hasattr(event.item, 'tool_call') and event.item.tool_call:
-                            tool_call = event.item.tool_call
-                            log_technical("info", f"Found tool_call: {type(tool_call)}")
-                            
-                            if hasattr(tool_call, 'function') and tool_call.function:
-                                tool_name = tool_call.function.name or "unknown"
-                                if hasattr(tool_call.function, 'arguments') and tool_call.function.arguments:
-                                    tool_input = str(tool_call.function.arguments)
-                                    # Truncate long inputs for logging
-                                    if len(tool_input) > 200:
-                                        tool_input = tool_input[:200] + "... (truncated)"
-                            elif hasattr(tool_call, 'name'):
-                                tool_name = tool_call.name or "unknown"
-                            
-                        # Method 3: Try to extract from other possible attributes
-                        elif hasattr(event.item, 'function_name'):
-                            tool_name = event.item.function_name or "unknown"
-                        elif hasattr(event.item, 'name'):
-                            tool_name = event.item.name or "unknown"
-                        elif hasattr(event.item, 'tool_name'):
-                            tool_name = event.item.tool_name or "unknown"
-                        
-                        # Log what we found
-                        log_technical("info", f"Final extracted tool name: {tool_name}")
-                        
-                        # Try to infer server name from tool name or other attributes
-                        server_name = self._infer_server_name(tool_name, event.item)
-                        log_technical("info", f"Inferred server name: {server_name}")
-                        
-                    except Exception as e:
-                        log_technical("info", f"Error extracting tool details: {e}")
-                        # Try to get string representation for debugging
-                        try:
-                            item_str = str(event.item)
-                            if len(item_str) > 300:
-                                item_str = item_str[:300] + "..."
-                            log_technical("info", f"Tool call item string: {item_str}")
-                        except:
-                            log_technical("info", "Could not get string representation of tool call item")
-                    
-                    # Store current tool info for completion logging
-                    current_tool_info = {
-                        'tool_name': tool_name,
-                        'server_name': server_name,
-                        'input': tool_input,
-                        'sequence': tool_call_sequence
-                    }
-                    
-                    log_tool(f"Starting tool call #{tool_call_sequence}: {server_name}.{tool_name}")
-                    
-                    # Log technical details to file
-                    log_technical("info", f"=== Tool Call [{tool_call_sequence}] Started ===")
-                    log_technical("info", f"    Server: {server_name}")
-                    log_technical("info", f"    Tool: {tool_name}")
-                    log_technical("info", f"    Input: {tool_input}")
-                    
-                    try:
-                        item_str = str(event.item)
-                        if len(item_str) > 500:
-                            item_str = item_str[:500] + "..."
-                        log_technical("debug", f"    Raw Item: {item_str}")
-                    except Exception:
-                        log_technical("debug", f"    Raw Item: [Unable to display]")
-                    
-                    # Update global stats
-                    _tool_call_stats['total_calls'] += 1
-                    
-                elif event.item.type == "tool_call_output_item":
-                    # Tool call completed
-                    duration = 0.0
-                    if current_tool_call_start:
-                        duration = time.time() - current_tool_call_start
-                        current_tool_call_start = None
-                    
-                    # Get tool info from current call
-                    tool_name = current_tool_info.get('tool_name', 'unknown')
-                    server_name = current_tool_info.get('server_name', 'unknown')
-                    sequence = current_tool_info.get('sequence', tool_call_sequence)
-                    
-                    # Extract output safely
-                    output_content = "N/A"
-                    output_size = 0
-                    error_message = None
-                    
-                    try:
-                        if hasattr(event.item, 'output'):
-                            output_content = str(event.item.output)
-                            output_size = len(output_content)
-                            # Keep more detail for file logs, truncate for console
-                            if len(output_content) > 1000:
-                                truncated_output = output_content[:1000] + "... (truncated)"
-                            else:
-                                truncated_output = output_content
-                        
-                        # Check for errors
-                        if hasattr(event.item, 'error') and event.item.error:
-                            error_message = str(event.item.error)
-                            
-                    except Exception as e:
-                        output_content = f"[Error extracting output: {e}]"
-                        truncated_output = output_content
-                    
-                    # Determine success
-                    is_success = error_message is None
-                    
-                    # Log tool call completion with enhanced logging
-                    status = "[OK]" if is_success else "[FAIL]"
-                    log_tool(f"Tool call #{sequence}: {server_name}.{tool_name} {status} ({duration:.2f}s)")
-                    
-                    # Log technical details to file
-                    log_technical("info", f"=== Tool Call [{sequence}] Completed ===")
-                    log_technical("info", f"    Server: {server_name}")
-                    log_technical("info", f"    Tool: {tool_name}")
-                    log_technical("info", f"    Duration: {duration:.2f}s")
-                    log_technical("info", f"    Success: {is_success}")
-                    log_technical("info", f"    Output Size: {output_size} characters")
-                    
-                    if error_message:
-                        log_technical("error", f"    Error: {error_message}")
-                    
-                    # Log output (truncated for readability)
-                    if len(output_content) > 2000:
-                        log_technical("info", f"    Output: {output_content[:2000]}... (truncated, full size: {output_size} chars)")
-                    else:
-                        log_technical("info", f"    Output: {output_content}")
-                    
-                    log_technical("info", f"=== End Tool Call [{sequence}] ===")
-                    
-                    # Log structured metrics
-                    MCPToolMetrics.log_tool_call(
-                        server_name=server_name,
-                        tool_name=tool_name,
-                        duration=duration,
-                        success=is_success,
-                        output_size=output_size
-                    )
-                    
-                    # Update global stats
-                    if is_success:
-                        _tool_call_stats['successful_calls'] += 1
-                    else:
-                        _tool_call_stats['failed_calls'] += 1
-                    
-                    _tool_call_stats['total_duration'] += duration
-                    
-                    # Clear current tool info
-                    current_tool_info = {}
-                    
-                elif event.item.type == "message_output_item":
-                    # Message output - collect for final result
-                    try:
-                        # Try ItemHelpers before falling back to raw object
-                        try:
-                            from agents import ItemHelpers
-                            message_text = ItemHelpers.text_message_output(event.item)
-                            if message_text and len(message_text.strip()) > 0:
-                                collected_responses.append(message_text)
-                                
-                                # Log abbreviated version for context
-                                if len(message_text) > 300:
-                                    abbreviated = message_text[:300] + "..."
-                                    log_agent(f"Agent reasoning: {abbreviated}")
-                                else:
-                                    log_agent(f"Agent reasoning: {message_text}")
-                                    
-                                log_technical("debug", f"Full agent response: {message_text[:500]}...")
-                            else:
-                                log_technical("warning", f"ItemHelpers returned empty text for message_output_item")
-                                collected_responses.append("[Agent response received but text extraction failed]")
-                        except Exception as helper_error:
-                            log_technical("warning", f"ItemHelpers failed: {helper_error}")
-                            collected_responses.append("[Error: Unable to extract response text - please check logs]")
-                        
-                    except Exception as extract_error:
-                        log_technical("warning", f"Error processing message output item: {extract_error}")
-                        # Still log that we got a response
-                        log_technical("debug", "Agent generated a response (text extraction failed)")
-                        
-        # Try to get the final result from the stream
-        try:
-            final_result = await result.result()
-            log_technical("info", "Successfully obtained final result from stream")
-            return final_result
-        except AttributeError:
-            log_technical("info", "Stream doesn't have result() method, using collected responses")
-            # If streaming API doesn't have result() method, use collected responses
-            if collected_responses:
-                # Combine all collected responses
-                full_response = "\n\n".join(collected_responses)
-                log_technical("info", f"Using collected responses as final result: {len(full_response)} chars")
-                return SimpleResult(full_response)
-            else:
-                log_technical("warning", "No responses collected from streaming API")
-                return SimpleResult("Task completed successfully with MCP tools")
-        except Exception as e:
-            log_technical("warning", f"Error extracting final result: {e}")
-            # Handle any other issues with result extraction
-            if collected_responses:
-                # Use collected responses as fallback
-                full_response = "\n\n".join(collected_responses)
-                log_technical("warning", f"Using collected responses as fallback: {len(full_response)} chars")
-                return SimpleResult(full_response)
-            else:
-                log_technical("warning", "No collected responses available, returning success indicator")
-                return SimpleResult("Task completed successfully with MCP tools")
 
 class TinyAgent:
     """
@@ -895,11 +769,11 @@ class TinyAgent:
     
     async def run(self, message: str, **kwargs) -> Any:
         """
-        Run the agent with a message.
+        Run the agent with a message using intelligent mode only.
         
         Args:
             message: Input message for the agent
-            **kwargs: Additional arguments passed to Runner.run
+            **kwargs: Additional arguments passed to intelligent agent
             
         Returns:
             Agent execution result
@@ -907,18 +781,20 @@ class TinyAgent:
         try:
             log_technical("info", f"Running agent with message: {message[:100]}...")
             
-            # Check if intelligent mode is enabled
-            if self.intelligent_mode and INTELLIGENCE_AVAILABLE:
-                log_technical("info", "Using intelligent mode with ReAct loop")
-                return await self._run_intelligent_mode(message, **kwargs)
-            else:
-                log_technical("info", "Using basic LLM mode")
-                return await self._run_basic_mode(message, **kwargs)
+            # 🔧 SIMPLIFIED: Only use intelligent mode
+            if not (self.intelligent_mode and INTELLIGENCE_AVAILABLE):
+                raise RuntimeError(
+                    "Intelligent mode is required but not available. "
+                    "Please check if intelligence components are properly installed."
+                )
+            
+            log_technical("info", "Using intelligent mode with ReAct loop")
+            return await self._run_intelligent_mode(message, **kwargs)
             
         except Exception as e:
             log_technical("error", f"Agent execution failed: {e}")
             raise
-    
+
     async def _run_intelligent_mode(self, message: str, **kwargs) -> Any:
         """
         Run the agent in intelligent mode using IntelligentAgent with ReAct loop
@@ -934,8 +810,9 @@ class TinyAgent:
             # Get the intelligent agent
             intelligent_agent = self._get_intelligent_agent()
             if not intelligent_agent:
-                log_technical("warning", "IntelligentAgent not available, falling back to basic mode")
-                return await self._run_basic_mode(message, **kwargs)
+                log_technical("error", "IntelligentAgent not available - check INTELLIGENCE_AVAILABLE")
+                # 🔧 DISABLED FALLBACK: Don't fall back to basic mode
+                raise RuntimeError("IntelligentAgent is required but not available")
             
             # Register MCP tools with the intelligent agent if available
             await self._register_mcp_tools_with_intelligent_agent(intelligent_agent)
@@ -958,199 +835,128 @@ class TinyAgent:
                 # Return the answer for compatibility
                 return SimpleResult(result.get('answer', 'Task completed successfully'))
             else:
-                # Fallback if result format is unexpected
+                # Return the result as-is if format is unexpected
                 return result
                 
         except Exception as e:
             log_technical("error", f"Intelligent mode execution failed: {e}")
-            # Fallback to basic mode on error
-            log_agent("Falling back to basic mode due to intelligent mode error")
-            return await self._run_basic_mode(message, **kwargs)
-    
-    async def _run_basic_mode(self, message: str, **kwargs) -> Any:
-        """
-        Run the agent in basic mode (original implementation)
-        
-        Args:
-            message: Input message for the agent  
-            **kwargs: Additional arguments
-            
-        Returns:
-            Basic agent execution result
-        """
-        # First, try without MCP tools for simple conversations
-        # This provides fast response for basic interactions
-        
-        # Check if message likely needs tools (simple heuristic)
-        needs_tools = self._message_likely_needs_tools(message)
-        
-        if not needs_tools:
-            # Try simple conversation without MCP tools first
-            log_technical("info", "Attempting simple conversation without MCP tools")
-            try:
-                simple_agent = self._create_simple_agent()
-                
-                # Filter out parameters that Runner.run doesn't accept
-                filtered_kwargs = {}
-                supported_params = ['max_turns', 'response_format', 'temperature', 'max_tokens']
-                for key, value in kwargs.items():
-                    if key in supported_params:
-                        filtered_kwargs[key] = value
-                
-                result = await Runner.run(
-                    starting_agent=simple_agent,
-                    input=message,
-                    **filtered_kwargs
-                )
-                log_technical("info", "Simple conversation completed successfully")
-                return result
-            except Exception as e:
-                log_technical("info", f"Simple conversation failed: {e}, falling back to MCP mode")
-                # Fall through to MCP mode
-        else:
-            log_technical("info", "Message likely needs tools, using MCP mode")
-        
-        # Use MCP tools (lazy loading)
-        return await self._run_with_mcp_tools(message, **kwargs)
-    
+            # 🔧 DISABLED FALLBACK: Don't fall back to basic mode
+            raise RuntimeError(f"Intelligent mode failed: {e}")
+
     async def _register_mcp_tools_with_intelligent_agent(self, intelligent_agent):
         """
-        Register available MCP tools with the IntelligentAgent using EnhancedMCPServerManager
+        Register MCP tools with the IntelligentAgent for tool-aware operation
         
         Args:
-            intelligent_agent: The IntelligentAgent instance
+            intelligent_agent: The IntelligentAgent instance to register tools with
         """
         try:
-            # Use enhanced MCP manager to get tool information with caching
-            if hasattr(self, 'mcp_manager') and self.mcp_manager:
-                # Check if it's the enhanced manager
-                if hasattr(self.mcp_manager, 'initialize_with_caching'):
-                    log_technical("info", "Using EnhancedMCPServerManager for tool registration")
-                    
-                    # Check if tools are already cached to avoid redundant initialization
-                    cached_tools = None
-                    if hasattr(self.mcp_manager, 'tool_cache') and self.mcp_manager.tool_cache:
-                        # Try to get from cache first
-                        cache_stats = self.mcp_manager.tool_cache.get_cache_stats()
-                        if cache_stats.get('valid_caches', 0) > 0:
-                            log_technical("info", f"Using cached tools: {cache_stats['total_tools_cached']} tools from {cache_stats['total_servers_cached']} servers")
-                            # Use cached tools directly
-                            cached_tools = {}
-                            for server_name in self.config.mcp.servers.keys():
-                                cached_server_tools = self.mcp_manager.tool_cache.get_cached_tools(server_name)
-                                if cached_server_tools:
-                                    cached_tools[server_name] = cached_server_tools
-                    
-                    # If no valid cache, initialize with caching (but limit logging)
-                    if not cached_tools:
-                        log_technical("info", "No valid cache found, initializing MCP servers...")
-                        # Temporarily suppress repetitive tool discovery logs
-                        filesystem_logger = logging.getLogger('agents.mcp')
-                        cache_logger = logging.getLogger('tinyagent.mcp.cache')
-                        old_filesystem_level = filesystem_logger.level
-                        old_cache_level = cache_logger.level
-                        
-                        # Suppress INFO/DEBUG messages during initialization
-                        filesystem_logger.setLevel(logging.WARNING)
-                        cache_logger.setLevel(logging.WARNING)
-                        
-                        try:
-                            cached_tools = await self.mcp_manager.initialize_with_caching()
-                        finally:
-                            # Restore original levels
-                            filesystem_logger.setLevel(old_filesystem_level)
-                            cache_logger.setLevel(old_cache_level)
-                    
-                    # Get all tools from cache
-                    all_tools = []
-                    total_servers = 0
-                    if cached_tools:
-                        for server_name, tool_list in cached_tools.items():
-                            if tool_list:
-                                total_servers += 1
-                                # Convert ToolInfo objects to dictionary format for intelligent agent
-                                for tool_info in tool_list:
-                                    tool_dict = {
-                                        'name': tool_info.name,
-                                        'description': tool_info.description,
-                                        'server': tool_info.server_name,
-                                        'category': tool_info.category,
-                                        'performance_metrics': tool_info.performance_metrics.__dict__ if tool_info.performance_metrics else {},
-                                        'last_updated': tool_info.last_updated.isoformat() if tool_info.last_updated else None,
-                                        'schema': tool_info.schema,
-                                        'function': None  # Will be handled by MCP execution
-                                    }
-                                    all_tools.append(tool_dict)
-                    
-                    # Register tools with intelligent agent (only if we have tools and they're not already registered)
-                    if all_tools:
-                        # Check if tools are already registered to avoid duplicate registration
-                        if not hasattr(intelligent_agent, '_mcp_tools_registered') or not intelligent_agent._mcp_tools_registered:
-                            intelligent_agent.register_mcp_tools(all_tools)
-                            # Don't set the flag here - let register_mcp_tools handle it internally
-                            log_technical("info", f"Enhanced registration: {len(all_tools)} tools from {total_servers} servers")
-                            log_agent(f"Registered {len(all_tools)} MCP tools with enhanced context")
-                        else:
-                            log_technical("debug", f"Tools already registered, skipping duplicate registration")
-                        
-                        # Build enhanced tool context using context builder (only if not already built)
-                        if (hasattr(intelligent_agent, 'mcp_context_builder') and 
-                            intelligent_agent.mcp_context_builder and 
-                            not getattr(intelligent_agent, '_tool_context_cache_valid', False)):
-                            
-                            try:
-                                # Build comprehensive tool context
-                                tool_context = intelligent_agent.mcp_context_builder.build_tool_context()
-                                
-                                if tool_context and tool_context.available_tools:
-                                    log_technical("info", f"Built enhanced tool context with {len(tool_context.available_tools)} tools")
-                                    
-                                    # Store context for future use in ReAct loop
-                                    intelligent_agent._current_tool_context = tool_context
-                                    intelligent_agent._tool_context_cache_valid = True
-                                    
-                                    # Log context summary (limited)
-                                    log_technical("debug", f"Tool context servers: {list(tool_context.server_status.keys())}")
-                                    log_technical("debug", f"Tool capabilities: {list(tool_context.capabilities_summary.keys())}")
-                                
-                                else:
-                                    log_technical("warning", "Tool context built but no tools available")
-                                
-                            except Exception as context_error:
-                                log_technical("warning", f"Error building enhanced tool context: {context_error}")
-                        else:
-                            log_technical("debug", "Tool context already built or context builder not available")
-                        
-                    else:
-                        log_technical("info", "No enhanced tools available to register")
-                        log_agent("No MCP tools available for enhanced registration")
-                else:
-                    # Fall back to basic manager functionality
-                    log_technical("warning", "MCP manager is not enhanced, using basic registration")
-                    await self._register_mcp_tools_basic(intelligent_agent)
-                
-            else:
-                # No MCP manager available
-                log_technical("warning", "Enhanced MCP manager not available, using basic registration")
-                await self._register_mcp_tools_basic(intelligent_agent)
-                
-        except Exception as e:
-            log_technical("error", f"Error in enhanced MCP tool registration: {e}")
-            # Don't log full traceback unless in debug mode
-            if logger.level <= logging.DEBUG:
-                import traceback
-                log_technical("debug", f"Enhanced registration traceback: {traceback.format_exc()}")
+            log_technical("info", "Registering MCP tools with IntelligentAgent")
             
-            # Fallback to basic registration
-            log_technical("info", "Falling back to basic tool registration")
-            try:
-                await self._register_mcp_tools_basic(intelligent_agent)
-            except Exception as fallback_error:
-                log_technical("error", f"Fallback registration also failed: {fallback_error}")
+            # 🔧 CRITICAL FIX: Ensure MCP connections are established BEFORE creating tool executor
+            connected_servers = await self._ensure_mcp_connections()
+            log_technical("info", f"MCP connections ensured: {len(connected_servers)} servers connected")
+            
+            # Verify connections are actually established
+            if not self._persistent_connections:
+                log_technical("warning", "No MCP connections established, skipping tool registration")
+                return
+            
+            log_technical("info", f"Active MCP connections: {list(self._persistent_connections.keys())}")
+            
+            # Collect available tools from all connected servers
+            available_tools = {}
+            tool_schemas = {}
+            mcp_tools_for_registration = []  # 🔧 NEW: List for register_mcp_tools()
+            
+            for server_name, connection in self._persistent_connections.items():
+                try:
+                    log_technical("info", f"Collecting tools from server: {server_name}")
+                    
+                    # List tools from this server
+                    if hasattr(connection, 'list_tools'):
+                        server_tools = await connection.list_tools()
+                        
+                        # 🔧 CRITICAL FIX: Handle different response formats
+                        tools_list = None
+                        if isinstance(server_tools, list):
+                            # Direct list response (most common case)
+                            tools_list = server_tools
+                            log_technical("info", f"Server {server_name} returned direct list with {len(tools_list)} tools")
+                        elif hasattr(server_tools, 'tools'):
+                            # Response with .tools attribute
+                            tools_list = server_tools.tools
+                            log_technical("info", f"Server {server_name} returned object with .tools attribute containing {len(tools_list)} tools")
+                        else:
+                            log_technical("warning", f"Server {server_name} returned unexpected format: {type(server_tools)}")
+                            continue
+                        
+                        if tools_list:
+                            for tool in tools_list:
+                                tool_name = tool.name
+                                available_tools[tool_name] = server_name
+                                
+                                # Store tool schema for intelligent agent
+                                tool_schemas[tool_name] = {
+                                    'name': tool_name,
+                                    'description': getattr(tool, 'description', f'{tool_name} from {server_name}'),
+                                    'server': server_name,
+                                    'schema': getattr(tool, 'inputSchema', {})
+                                }
+                                
+                                # 🔧 NEW: Prepare tool for register_mcp_tools()
+                                mcp_tools_for_registration.append({
+                                    'name': tool_name,
+                                    'description': getattr(tool, 'description', f'{tool_name} from {server_name}'),
+                                    'server': server_name,
+                                    'schema': getattr(tool, 'inputSchema', {}),
+                                    'category': 'file_operations' if 'file' in tool_name.lower() else 
+                                               'web_operations' if any(x in tool_name.lower() for x in ['fetch', 'search', 'web']) else
+                                               'reasoning' if 'think' in tool_name.lower() else 'general'
+                                })
+                                
+                            log_technical("info", f"Server {server_name} provided {len(tools_list)} tools")
+                        else:
+                            log_technical("warning", f"Server {server_name} returned empty tools list")
+                    else:
+                        log_technical("warning", f"Server {server_name} does not support list_tools")
+                        
+                except Exception as e:
+                    log_technical("error", f"Error collecting tools from server {server_name}: {e}")
+                    continue
+            
+            # Log total available tools
+            log_technical("info", f"Total MCP tools available: {len(available_tools)}")
+            for tool_name, server_name in available_tools.items():
+                log_technical("debug", f"  - {tool_name} (from {server_name})")
+            
+            # Store tool information in intelligent agent
+            intelligent_agent.available_mcp_tools = available_tools
+            intelligent_agent.mcp_tool_schemas = tool_schemas
+            
+            # 🔧 CRITICAL FIX: Register tools with IntelligentAgent's register_mcp_tools method
+            if mcp_tools_for_registration:
+                log_technical("info", f"Calling register_mcp_tools with {len(mcp_tools_for_registration)} tools")
+                intelligent_agent.register_mcp_tools(mcp_tools_for_registration)
+                log_technical("info", f"Successfully registered {len(mcp_tools_for_registration)} MCP tools with IntelligentAgent")
+            else:
+                log_technical("warning", "No tools available for registration")
+            
+            # NOW create and register the MCP tool executor (after connections are established)
+            mcp_tool_executor = self._create_mcp_tool_executor()
+            intelligent_agent.set_mcp_tool_executor(mcp_tool_executor)
+            
+            log_technical("info", f"MCP tools registered with IntelligentAgent: {len(available_tools)} tools from {len(self._persistent_connections)} servers")
+            
+        except Exception as e:
+            log_technical("error", f"Error registering MCP tools with IntelligentAgent: {e}")
+            import traceback
+            log_technical("debug", f"Full traceback: {traceback.format_exc()}")
+            # Don't raise - allow intelligent agent to work without MCP tools
 
     async def _register_mcp_tools_basic(self, intelligent_agent):
         """
-        Basic MCP tool registration (fallback method)
+        Basic MCP tool registration (for compatibility)
         
         Args:
             intelligent_agent: The IntelligentAgent instance
@@ -1179,177 +985,23 @@ class TinyAgent:
                                     'function': None  # Will be handled by MCP execution
                                 })
                         else:
-                            log_technical("warning", f"Server {server_name} tools response format unexpected")
+                            log_technical("warning", f"Server {server_name} returned unexpected tools format")
                     else:
                         log_technical("warning", f"Server {server_name} does not support list_tools")
                 except Exception as e:
                     log_technical("warning", f"Error getting tools from {server_name}: {e}")
                     continue
             
-            # Register tools with intelligent agent
+            # Register tools with intelligent agent if available
             if mcp_tools:
-                intelligent_agent.register_mcp_tools(mcp_tools)
+                if hasattr(intelligent_agent, 'register_mcp_tools'):
+                    intelligent_agent.register_mcp_tools(mcp_tools)
                 log_technical("info", f"Basic registration: {len(mcp_tools)} MCP tools")
             else:
                 log_technical("info", "No MCP tools available to register")
                 
         except Exception as e:
             log_technical("error", f"Error in basic MCP tool registration: {e}")
-
-    def _message_likely_needs_tools(self, message: str) -> bool:
-        """
-        Simple heuristic to determine if a message likely needs MCP tools.
-        
-        Args:
-            message: Input message to analyze
-            
-        Returns:
-            True if tools are likely needed, False for simple conversation
-        """
-        message_lower = message.lower()
-        
-        # Keywords that typically require tools
-        tool_keywords = [
-            'file', 'write', 'read', 'create', 'save', 'open', 'edit',
-            'search', 'find', 'analyze', 'fetch', 'download', 'upload',
-            'think', 'plan', 'step', 'break down', 'sequential',
-            'document', 'report', 'generate', 'build', 'make'
-        ]
-        
-        # Check for tool-related keywords
-        for keyword in tool_keywords:
-            if keyword in message_lower:
-                return True
-        
-        # Simple conversation indicators
-        simple_patterns = [
-            'hello', 'hi', 'how are you', 'what can you do', 
-            'introduce yourself', 'who are you', 'help', 'quit', 'exit'
-        ]
-        
-        for pattern in simple_patterns:
-            if pattern in message_lower:
-                return False
-        
-        # Default to not needing tools for short, simple messages
-        return len(message.split()) > 10
-
-    def _create_simple_agent(self) -> Agent:
-        """
-        Create a simple agent without MCP servers for basic conversations.
-        
-        Returns:
-            Agent instance without MCP tools
-        """
-        try:
-            # Get API key from environment
-            api_key = os.getenv(self.config.llm.api_key_env)
-            if not api_key:
-                raise ValueError(f"API key not found in environment variable: {self.config.llm.api_key_env}")
-            
-            # Create model instance
-            model_instance = self._create_model_instance(self.model_name)
-            
-            # Set up custom OpenAI client if base_url is configured (for OpenRouter, etc.)
-            # Note: For LiteLLM models, base_url is handled by LitellmModel itself
-            if self.config.llm.base_url and not self._should_use_litellm(self.model_name):
-                # Clear any conflicting environment variable that might override our configuration
-                original_base_url = os.environ.get('OPENAI_BASE_URL')
-                if original_base_url and original_base_url != self.config.llm.base_url:
-                    log_technical("warning", f"Environment OPENAI_BASE_URL ({original_base_url}) conflicts with config base_url ({self.config.llm.base_url}), using config")
-                    # Temporarily clear the environment variable
-                    os.environ.pop('OPENAI_BASE_URL', None)
-                
-                try:
-                    custom_client = AsyncOpenAI(
-                        api_key=api_key,
-                        base_url=self.config.llm.base_url
-                    )
-                    set_default_openai_client(custom_client)
-                    
-                    # Add to global cleanup list
-                    global _openai_clients
-                    _openai_clients.append(custom_client)
-                    
-                    log_technical("info", f"Simple agent using custom OpenAI client with base_url: {self.config.llm.base_url}")
-                finally:
-                    # Restore the original environment variable if it existed
-                    if original_base_url:
-                        os.environ['OPENAI_BASE_URL'] = original_base_url
-            
-            # Create agent without MCP servers
-            agent_kwargs = {
-                "name": self.config.agent.name,
-                "instructions": self.instructions,
-                "model": model_instance
-                # Note: no mcp_servers parameter
-            }
-            
-            # Add model_settings only for non-LiteLLM models
-            if not self._should_use_litellm(self.model_name):
-                from agents import ModelSettings
-                agent_kwargs["model_settings"] = ModelSettings(temperature=self.config.llm.temperature)
-            
-            agent = Agent(**agent_kwargs)
-            
-            model_type = "LiteLLM" if self._should_use_litellm(self.model_name) else "OpenAI"
-            log_technical("info", f"Created simple agent with {model_type} model '{self.model_name}' (no MCP servers)")
-            
-            return agent
-            
-        except Exception as e:
-            log_technical("error", f"Failed to create simple agent: {e}")
-            raise
-
-    async def _run_with_mcp_tools(self, message: str, **kwargs) -> Any:
-        """
-        Run agent with MCP tools (lazy loading).
-        
-        Args:
-            message: Input message
-            **kwargs: Additional arguments
-            
-        Returns:
-            Agent execution result
-        """
-        try:
-            # Ensure MCP connections (lazy loading)
-            connected_servers = await self._ensure_mcp_connections()
-            
-            if not connected_servers:
-                # No MCP servers available, use simple agent
-                log_agent("No MCP servers available, running without tools")
-                log_technical("info", "No MCP servers connected, falling back to simple mode")
-                
-                simple_agent = self._create_simple_agent()
-                result = await Runner.run(
-                    starting_agent=simple_agent,
-                    input=message,
-                    **kwargs
-                )
-                return result
-            else:
-                # Use MCP-enabled agent
-                log_tool(f"Using MCP tools: {len(connected_servers)} servers available")
-                
-                # Create MCP-enabled agent
-                agent = Agent(
-                    name=self.config.agent.name,
-                    instructions=self.instructions,
-                    model=self._create_model_instance(self.model_name),
-                    mcp_servers=connected_servers
-                )
-                
-                # Wrap with tool call logger
-                logged_agent = MCPToolCallLogger(agent, use_streaming=self.use_streaming)
-                
-                # Run with MCP tools
-                result = await logged_agent.run(message, **kwargs)
-                return result
-                
-        except Exception as e:
-            log_technical("error", f"Error running with MCP tools: {e}")
-            raise
 
     async def _ensure_mcp_connections(self) -> List[Any]:
         """
@@ -1794,128 +1446,68 @@ class TinyAgent:
 
     async def run_stream(self, message: str, **kwargs) -> AsyncIterator[str]:
         """
-        Run the agent with streaming output.
+        Run the agent with streaming output using intelligent mode only.
         
         Args:
             message: Input message for the agent
-            **kwargs: Additional arguments passed to Runner.run
+            **kwargs: Additional arguments passed to intelligent agent
             
         Yields:
             String chunks as they are generated
         """
         try:
-            # Check if message likely needs tools
-            needs_tools = self._message_likely_needs_tools(message)
+            log_technical("info", f"Running agent with streaming for message: {message[:100]}...")
             
-            if not needs_tools:
-                # Try simple conversation without MCP tools first - streaming
-                log_technical("debug", "Attempting streaming without MCP tools")
-                
-                from litellm import acompletion
-                import json
-                
-                # Create a simple streaming request
-                try:
-                    # Use the same model formatting logic as _create_model_instance
-                    formatted_model_name = self.model_name
-                    if self.config.llm.base_url and "openrouter.ai" in self.config.llm.base_url:
-                        # For OpenRouter, always add openrouter/ prefix unless already present
-                        if not self.model_name.startswith("openrouter/"):
-                            formatted_model_name = f"openrouter/{self.model_name}"
-                    
-                    log_technical("debug", f"Using formatted model name for streaming: {formatted_model_name}")
-                    
-                    stream_response = await acompletion(
-                        model=formatted_model_name,
-                        messages=[
-                            {"role": "system", "content": self.instructions},
-                            {"role": "user", "content": message}
-                        ],
-                        stream=True,
-                        **self._get_model_kwargs()
-                    )
-                    
-                    log_technical("info", "Streaming response started")
-                    
-                    async for chunk in stream_response:
-                        if chunk.choices and chunk.choices[0].delta.content:
-                            content = chunk.choices[0].delta.content
-                            yield content
-                    
-                    log_technical("info", "Streaming response completed")
-                    return
-                    
-                except Exception as e:
-                    log_technical("warning", f"Streaming without tools failed: {e}")
-                    # Fall through to MCP tool version
+            # 🔧 SIMPLIFIED: Only use intelligent mode
+            if not (self.intelligent_mode and INTELLIGENCE_AVAILABLE):
+                yield "[ERROR] Intelligent mode is required but not available. Please check if intelligence components are properly installed."
+                return
             
-            # If simple streaming failed or tools needed, use MCP tools
-            await self._ensure_mcp_connections()
+            log_technical("info", "Using intelligent mode with streaming output")
             
-            # Get the agent with MCP tools
-            agent = self.get_agent()
+            # Get the intelligent agent
+            intelligent_agent = self._get_intelligent_agent()
+            if not intelligent_agent:
+                yield "[ERROR] IntelligentAgent not available - check INTELLIGENCE_AVAILABLE"
+                return
             
-            # Filter out parameters that Runner.run_streamed doesn't accept
-            filtered_kwargs = {}
-            supported_params = ['max_turns', 'response_format', 'temperature', 'max_tokens']
-            for key, value in kwargs.items():
-                if key in supported_params:
-                    filtered_kwargs[key] = value
+            # Register MCP tools with the intelligent agent if available
+            await self._register_mcp_tools_with_intelligent_agent(intelligent_agent)
             
-            # Use streaming API with MCP tools
-            result = Runner.run_streamed(
-                starting_agent=agent,
-                input=message,
-                **filtered_kwargs
-            )
+            # Execute using intelligent agent with full ReAct loop
+            log_agent("Starting intelligent task execution with ReAct loop (streaming)...")
             
-            collected_content = ""
-            log_technical("info", "Starting MCP streaming response")
-            
-            async for event in result.stream_events():
-                if event.type == "run_item_stream_event":
-                    if event.item.type == "message_output_item":
-                        try:
-                            # Try ItemHelpers before falling back to raw object
-                            try:
-                                from agents import ItemHelpers
-                                message_text = ItemHelpers.text_message_output(event.item)
-                                if message_text and len(message_text.strip()) > 0:
-                                    collected_content += message_text
-                                    yield message_text
-                                else:
-                                    log_technical("warning", f"ItemHelpers returned empty text for message_output_item")
-                                    yield "[Agent response received but text extraction failed]"
-                            except Exception as helper_error:
-                                log_technical("warning", f"ItemHelpers failed: {helper_error}")
-                                yield "[Error: Unable to extract response text - please check logs]"
-                        except Exception as content_error:
-                            log_technical("warning", f"Error accessing message content: {content_error}")
-                            # Try alternative access methods
-                            try:
-                                from agents import ItemHelpers
-                                message_text = ItemHelpers.text_message_output(event.item)
-                                if message_text:
-                                    collected_content += message_text
-                                    yield message_text
-                            except Exception as helper_error:
-                                log_technical("debug", f"ItemHelpers also failed: {helper_error}")
-                                continue
-            
-            if not collected_content:
-                # Fallback if no streaming content was captured
-                final_result = await result.get_final_result()
-                if hasattr(final_result, 'final_output'):
-                    yield final_result.final_output
+            try:
+                # Check if intelligent agent supports streaming
+                if hasattr(intelligent_agent, 'run_stream'):
+                    # Use streaming if available
+                    async for chunk in intelligent_agent.run_stream(message, context=kwargs):
+                        yield chunk
                 else:
-                    yield str(final_result)
-            
-            log_technical("info", f"MCP streaming completed, total chars: {len(collected_content)}")
-            
+                    # Fall back to non-streaming intelligent mode
+                    result = await intelligent_agent.run(message, context=kwargs)
+                    
+                    # Stream the result
+                    if isinstance(result, dict) and 'answer' in result:
+                        answer = result.get('answer', 'Task completed successfully')
+                        # Stream the answer character by character for better UX
+                        for char in answer:
+                            yield char
+                            # Small delay to simulate streaming
+                            import asyncio
+                            await asyncio.sleep(0.01)
+                    else:
+                        yield str(result)
+                    
+                    log_technical("info", "Intelligent streaming completed")
+                    
+            except Exception as e:
+                log_technical("error", f"Intelligent mode streaming failed: {e}")
+                yield f"[ERROR] Intelligent mode failed: {e}"
+                
         except Exception as e:
             log_technical("error", f"Streaming run failed: {e}")
             yield f"[ERROR] {str(e)}"
-
 
     def run_stream_sync(self, message: str, **kwargs) -> Iterator[str]:
         """
@@ -1983,18 +1575,47 @@ class TinyAgent:
                     async for chunk in self.run_stream(message, **kwargs):
                         yield chunk
                 
-                # Run the async generator synchronously
+                # Convert async generator to sync generator
+                import asyncio
                 gen = collect_stream()
-                try:
-                    while True:
-                        chunk = loop.run_until_complete(gen.__anext__())
+                
+                while True:
+                    try:
+                        chunk = asyncio.get_event_loop().run_until_complete(gen.__anext__())
                         yield chunk
-                except StopAsyncIteration:
-                    pass
+                    except StopAsyncIteration:
+                        break
                     
         except Exception as e:
             log_technical("error", f"Sync streaming failed: {e}")
             yield f"[ERROR] {str(e)}"
+
+    def _create_simple_agent(self) -> Agent:
+        """
+        Create a simple LLM agent for use with IntelligentAgent
+        
+        Returns:
+            Simple Agent instance for reasoning
+        """
+        try:
+            # Create simple agent without MCP servers for reasoning
+            simple_agent = Agent(
+                name=f"{self.config.agent.name}-Reasoning",
+                instructions=self.instructions,
+                model=self._create_model_instance(self.model_name)
+            )
+            
+            # Add model_settings if needed
+            if not self._should_use_litellm(self.model_name):
+                from agents import ModelSettings
+                simple_agent.model_settings = ModelSettings(temperature=self.config.llm.temperature)
+            
+            log_technical("info", f"Created simple agent for reasoning: {simple_agent.name}")
+            return simple_agent
+            
+        except Exception as e:
+            log_technical("error", f"Failed to create simple agent: {e}")
+            raise
 
     def _get_intelligent_agent(self):
         """Get or create the IntelligentAgent instance"""
@@ -2118,14 +1739,27 @@ class TinyAgent:
                     try:
                         if hasattr(connection, 'list_tools'):
                             server_tools = await connection.list_tools()
-                            if hasattr(server_tools, 'tools'):
-                                for tool in server_tools.tools:
+                            
+                            # 🔧 CRITICAL FIX: Handle different response formats
+                            tools_list = None
+                            if isinstance(server_tools, list):
+                                # Direct list response (most common case)
+                                tools_list = server_tools
+                            elif hasattr(server_tools, 'tools'):
+                                # Response with .tools attribute
+                                tools_list = server_tools.tools
+                            else:
+                                log_technical("warning", f"Server {srv_name} returned unexpected format: {type(server_tools)}")
+                                continue
+                            
+                            if tools_list:
+                                for tool in tools_list:
                                     if tool.name == tool_name:
                                         target_server = connection
                                         server_name = srv_name
                                         break
-                            if target_server:
-                                break
+                                if target_server:
+                                    break
                     except Exception as e:
                         log_technical("warning", f"Error checking tools for server {srv_name}: {e}")
                         continue
@@ -2137,47 +1771,63 @@ class TinyAgent:
                         try:
                             if hasattr(connection, 'list_tools'):
                                 server_tools = await connection.list_tools()
-                                if hasattr(server_tools, 'tools'):
-                                    available_tools.extend([t.name for t in server_tools.tools])
+                                
+                                # 🔧 CRITICAL FIX: Handle different response formats
+                                tools_list = None
+                                if isinstance(server_tools, list):
+                                    # Direct list response (most common case)
+                                    tools_list = server_tools
+                                elif hasattr(server_tools, 'tools'):
+                                    # Response with .tools attribute
+                                    tools_list = server_tools.tools
+                                else:
+                                    continue
+                                
+                                if tools_list:
+                                    available_tools.extend([t.name for t in tools_list])
                         except:
                             pass
                     
                     log_technical("warning", f"Tool {tool_name} not found in any connected server. Available: {available_tools}")
                     return f"Tool '{tool_name}' not found. Available tools: {', '.join(available_tools[:10])}"
                 
-                # Execute the tool using the MCP protocol
-                log_technical("info", f"Executing {tool_name} on server {server_name}")
-                
                 # Create proper MCP call_tool request
-                from agents.mcp import CallToolRequest
-                
-                tool_request = CallToolRequest(
-                    name=tool_name,
-                    arguments=params or {}
-                )
-                
-                # Execute the tool
-                result = await target_server.call_tool(tool_request)
-                
-                if hasattr(result, 'content'):
-                    # Extract the actual content
-                    content = result.content
-                    if isinstance(content, list) and len(content) > 0:
-                        # Get the first content item
-                        content_item = content[0]
-                        if hasattr(content_item, 'text'):
-                            actual_result = content_item.text
+                try:
+                    from mcp.types import CallToolRequest
+                    
+                    # Execute the tool using the MCP protocol
+                    log_technical("info", f"Executing {tool_name} on server {server_name}")
+                    
+                    # 🔧 CRITICAL FIX: Use direct call_tool method with proper parameters
+                    result = await target_server.call_tool(tool_name, params or {})
+                    
+                    # Process result and return
+                    if hasattr(result, 'content'):
+                        # Extract the actual content
+                        content = result.content
+                        if isinstance(content, list) and len(content) > 0:
+                            # Get the first content item
+                            content_item = content[0]
+                            if hasattr(content_item, 'text'):
+                                actual_result = content_item.text
+                            else:
+                                actual_result = str(content_item)
                         else:
-                            actual_result = str(content_item)
+                            actual_result = str(content)
                     else:
-                        actual_result = str(content)
-                else:
-                    actual_result = str(result)
-                
-                log_technical("info", f"Tool {tool_name} executed successfully: {actual_result[:200]}...")
-                log_tool(f"MCP tool executed: {server_name}.{tool_name} -> {len(actual_result)} chars")
-                
-                return actual_result
+                        actual_result = str(result)
+                    
+                    log_technical("info", f"Tool {tool_name} executed successfully: {actual_result[:200]}...")
+                    log_tool(f"MCP tool executed: {server_name}.{tool_name} -> {len(actual_result)} chars")
+                    
+                    return actual_result
+                    
+                except ImportError as import_error:
+                    log_technical("error", f"Failed to import CallToolRequest: {import_error}")
+                    return f"Tool execution failed: MCP types not available - {import_error}"
+                except Exception as e:
+                    log_technical("error", f"Failed to execute tool {tool_name}: {e}")
+                    return f"Tool execution failed: {e}"
                 
             except Exception as e:
                 error_msg = f"Error executing MCP tool {tool_name}: {str(e)}"

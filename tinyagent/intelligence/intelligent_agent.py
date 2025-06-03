@@ -169,43 +169,105 @@ class IntelligentAgent:
         """
         logger.info("Handling tool query request")
         
-        # Get all available tools
+        # 🔧 ENHANCED: Get all available tools from multiple sources
         tools = await self._get_available_tools()
         
         if not tools:
-            return "我当前没有可用的MCP工具。请检查MCP服务器配置。"
+            # Try to get tools from cache if direct query failed
+            if hasattr(self, 'mcp_context_builder') and self.mcp_context_builder:
+                try:
+                    tool_context = self.mcp_context_builder.build_tool_context()
+                    if tool_context and tool_context.available_tools:
+                        tools = []
+                        for tool_info in tool_context.available_tools:
+                            tools.append({
+                                'name': tool_info.name,
+                                'description': tool_info.description,
+                                'server': tool_info.server_name,
+                                'category': tool_info.category
+                            })
+                except Exception as e:
+                    logger.warning(f"Error getting tools from context builder: {e}")
         
-        # Group tools by server
+        if not tools:
+            return ("🔧 **当前可用的MCP工具状态**\n\n"
+                   "❌ **没有发现可用的工具**\n\n"
+                   "**可能的原因：**\n"
+                   "• MCP服务器连接失败\n"
+                   "• 工具缓存为空\n" 
+                   "• 服务器配置问题\n\n"
+                   "**建议操作：**\n"
+                   "1. 检查MCP服务器状态: `python -m tinyagent list-servers --show-tools`\n"
+                   "2. 重启MCP服务器连接\n"
+                   "3. 检查配置文件设置")
+        
+        # 🔧 ENHANCED: Group tools by server and format better
         tools_by_server = {}
         for tool in tools:
-            server = tool.get('server', 'unknown')
-            if server not in tools_by_server:
-                tools_by_server[server] = []
-            tools_by_server[server].append(tool)
+            server_name = tool.get('server', '未知服务器')
+            if server_name not in tools_by_server:
+                tools_by_server[server_name] = []
+            tools_by_server[server_name].append(tool)
         
-        # Format response
-        response = "我当前可用的MCP工具包括：\n\n"
+        response_parts = ["🔧 **当前可用的MCP工具** \n"]
         
+        total_tools = len(tools)
+        total_servers = len(tools_by_server)
+        
+        response_parts.append(f"📊 **总计**: {total_tools} 个工具，来自 {total_servers} 个服务器\n")
+        
+        # Add server status indicators
         for server_name, server_tools in tools_by_server.items():
-            response += f"**{server_name}服务器** ({len(server_tools)}个工具):\n"
-            for tool in server_tools:
-                tool_name = tool.get('name', 'unknown')
-                tool_desc = tool.get('description', '无描述')
+            tool_count = len(server_tools)
+            
+            # Determine server status emoji
+            if tool_count > 0:
+                status_emoji = "🟢"  # Green for active
+                status_text = "活跃"
+            else:
+                status_emoji = "🔴"  # Red for inactive  
+                status_text = "非活跃"
+            
+            response_parts.append(f"\n{status_emoji} **{server_name}** ({status_text} - {tool_count} 工具)")
+            response_parts.append("-" * 50)
+            
+            # List tools for this server
+            for i, tool in enumerate(server_tools, 1):
+                tool_name = tool.get('name', '未知工具')
+                description = tool.get('description', '无描述')
+                category = tool.get('category', '通用')
+                
                 # Truncate long descriptions
-                if len(tool_desc) > 100:
-                    tool_desc = tool_desc[:100] + "..."
-                response += f"- {tool_name}: {tool_desc}\n"
-            response += "\n"
+                if len(description) > 100:
+                    description = description[:100] + "..."
+                
+                response_parts.append(f"{i}. **{tool_name}** ({category})")
+                response_parts.append(f"   📝 {description}")
+                
+                # Add usage example based on tool type
+                if 'read' in tool_name.lower() or 'file' in tool_name.lower():
+                    response_parts.append(f"   💡 用法示例: 读取文件内容")
+                elif 'write' in tool_name.lower() or 'create' in tool_name.lower():
+                    response_parts.append(f"   💡 用法示例: 创建或写入文件")
+                elif 'fetch' in tool_name.lower() or 'get' in tool_name.lower():
+                    response_parts.append(f"   💡 用法示例: 获取网络内容")
+                elif 'search' in tool_name.lower():
+                    response_parts.append(f"   💡 用法示例: 搜索信息")
+                else:
+                    response_parts.append(f"   💡 用法示例: {category}相关操作")
+                
+                response_parts.append("")  # Empty line between tools
         
-        response += f"总计: {len(tools)}个可用工具\n\n"
-        response += "您可以直接要求我使用这些工具执行具体任务。"
+        response_parts.append("\n🎯 **如何使用这些工具：**")
+        response_parts.append("• 直接描述您想要完成的任务")  
+        response_parts.append("• 我会自动选择合适的工具并执行")
+        response_parts.append("• 例如: '读取README.md文件' 或 '搜索最新新闻'")
         
-        logger.info(f"Generated tool query response for {len(tools)} tools from {len(tools_by_server)} servers")
-        return response
+        return "\n".join(response_parts)
 
     def _build_enhanced_tool_context(self, task_hint: Optional[str] = None) -> Optional[str]:
         """
-        Build enhanced tool context for better task understanding and planning
+        Build enhanced tool context using MCP context builder
         
         Args:
             task_hint: Optional hint about the task to help focus tool selection
@@ -219,16 +281,14 @@ class IntelligentAgent:
         try:
             # Try to build tool context
             tool_context = self.mcp_context_builder.build_tool_context(
-                include_performance_metrics=True,
-                include_server_status=True,
                 task_hint=task_hint
             )
             
-            if tool_context and tool_context.context_string:
+            if tool_context and tool_context.context_text:
                 self._last_tool_context = tool_context
                 self._tool_context_cache_valid = True
-                logger.debug(f"Built enhanced tool context: {len(tool_context.context_string)} chars")
-                return tool_context.context_string
+                logger.debug(f"Built enhanced tool context: {len(tool_context.context_text)} chars")
+                return tool_context.context_text
             else:
                 logger.warning("Tool context builder returned empty context")
                 return None
@@ -247,7 +307,7 @@ class IntelligentAgent:
             "tools_count": len(self._last_tool_context.available_tools),
             "servers": list(self._last_tool_context.server_status.keys()),
             "capabilities": list(self._last_tool_context.capabilities_summary.keys()),
-            "context_size": len(self._last_tool_context.context_string) if self._last_tool_context.context_string else 0,
+            "context_size": len(self._last_tool_context.context_text) if self._last_tool_context.context_text else 0,
             "cache_valid": self._tool_context_cache_valid
         }
 
@@ -636,6 +696,18 @@ class IntelligentAgent:
             self._mcp_tools.append(tool)
             registered_count += 1
         
+        # 🔧 CRITICAL FIX: Register MCP tools with ReasoningEngine
+        # This was the missing piece that caused the intelligent mode to use simulated actions
+        # instead of real MCP tools
+        if registered_count > 0:
+            logger.info(f"Registering {len(self._mcp_tools)} MCP tools with ReasoningEngine")
+            self.reasoning_engine.register_mcp_tools(self._mcp_tools)
+            
+            # Also update task planner with available tools
+            available_tools = {tool.get('name'): tool for tool in self._mcp_tools}
+            self.task_planner.available_tools = available_tools
+            logger.info(f"Updated TaskPlanner with {len(available_tools)} available tools")
+        
         # Mark as registered to prevent future duplicate registrations
         self._mcp_tools_registered = True
         
@@ -687,6 +759,7 @@ class IntelligentAgent:
                 logger.warning(f"Failed to update tool cache: {e}")
             
         logger.info(f"Completed registering {registered_count} new MCP tools from {len(tools_by_server)} servers")
+        logger.info(f"ReasoningEngine now has {len(self.reasoning_engine.available_mcp_tools)} MCP tools available")
     
     def get_conversation_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Get conversation history from memory"""

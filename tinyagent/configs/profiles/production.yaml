@@ -15,7 +15,7 @@ mcp:
   # 生产环境启用所有服务器
   enabled_servers:
     - "filesystem"
-    - "fetch"
+    - "mysearch"
     - "sqlite"
 
 logging:

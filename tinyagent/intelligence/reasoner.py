@@ -300,59 +300,139 @@ class ReasoningEngine:
     
     async def _acting_phase(self, context: Dict[str, Any], step_id: int) -> Optional[ReasoningStep]:
         """
-        ACTING phase: Execute the planned action WITH REAL TOOL EXECUTION
+        ACTING - Execute the planned action with actual MCP tool execution
         
-        🔧 ENHANCED: Now actually executes MCP tools instead of just simulating
+        Args:
+            context: Reasoning context
+            step_id: Current step ID
+            
+        Returns:
+            ReasoningStep with action results (NOW WITH REAL TOOL EXECUTION!)
         """
-        start_time = time.time()
-        
-        # Determine the action to take based on context
-        action, action_params = self._select_action(context)
-        
-        # 🔧 NEW: Actually execute the tool if possible
-        tool_result = None
-        execution_success = True
-        execution_error = None
-        
         try:
-            # Check if this is an MCP tool that can be executed
-            if action in self.available_mcp_tools and self.tool_executor:
-                logger.info(f"Executing MCP tool: {action} with params: {action_params}")
+            # Determine the action to take
+            action, action_params = self._select_action(context)
+            
+            if not action:
+                return None
+            
+            # 🔧 ENHANCED: Display reasoning process in Chinese
+            print(f"\n🧠 **推理阶段 {step_id} - 行动执行**")
+            print(f"🎯 计划行动: {action}")
+            print(f"📋 行动参数: {self._format_params_for_display(action_params)}")
+            print("-" * 60)
+            
+            step_start = time.time()
+            
+            # 🔧 NEW: Execute actual MCP tool if tool executor is available
+            tool_result = None
+            execution_success = True
+            execution_error = None
+            
+            if self.tool_executor and action in self.available_mcp_tools:
+                # This is an MCP tool - execute it for real!
+                print(f"🔧 执行MCP工具: {action}")
+                print(f"🖥️  服务器: {self.available_mcp_tools[action]}")
                 
-                # Execute the actual MCP tool
-                tool_result = await self.tool_executor(action, action_params)
-                execution_success = True
-                logger.info(f"Tool {action} executed successfully")
-                
-            elif action.startswith("mcp_") or action in self.available_mcp_tools:
-                # This looks like an MCP tool but we can't execute it
-                execution_error = f"MCP tool '{action}' cannot be executed (no executor available)"
-                execution_success = False
-                logger.warning(execution_error)
-                
+                try:
+                    start_time = time.time()
+                    tool_result = await self.tool_executor(action, action_params)
+                    execution_time = time.time() - start_time
+                    
+                    print(f"✅ 工具执行成功!")
+                    print(f"📊 执行结果: {self._format_result_for_display(tool_result)}")
+                    print(f"⏱️  执行耗时: {execution_time:.2f}秒")
+                    
+                    logger.info(f"Successfully executed MCP tool {action} in {execution_time:.2f}s")
+                    
+                except Exception as e:
+                    execution_success = False
+                    execution_error = str(e)
+                    tool_result = f"工具执行失败: {e}"
+                    
+                    print(f"❌ 工具执行失败: {e}")
+                    logger.error(f"Failed to execute MCP tool {action}: {e}")
             else:
-                # This is a built-in action, simulate it for now
-                tool_result = f"Simulated execution of {action}"
-                logger.info(f"Simulating built-in action: {action}")
-                
+                # This is a reasoning action or tool executor not available
+                print(f"💭 执行推理行动: {action}")
+                tool_result = f"推理行动 '{action}' 已计划执行"
+                logger.info(f"Planned reasoning action: {action}")
+            
+            duration = time.time() - step_start
+            
+            # Create action step with real execution results
+            action_step = ReasoningStep(
+                step_id=step_id,
+                state=ReasoningState.ACTING,
+                thought=f"执行行动: {action}",
+                action=action,
+                action_params=action_params,
+                confidence=0.8,  # High confidence for planned actions
+                duration=duration,
+                # 🔧 NEW: Add actual execution results
+                tool_result=tool_result,
+                execution_success=execution_success,
+                execution_error=execution_error
+            )
+            
+            print(f"✅ 行动阶段完成 (耗时: {duration:.2f}秒)")
+            print("=" * 60)
+            
+            return action_step
+            
         except Exception as e:
-            execution_error = f"Tool execution failed: {str(e)}"
-            execution_success = False
-            logger.error(f"Error executing tool {action}: {e}")
+            logger.error(f"Error in acting phase: {e}")
+            duration = time.time() - step_start if 'step_start' in locals() else 0
+            
+            print(f"❌ 行动阶段失败: {e}")
+            print("=" * 60)
+            
+            return ReasoningStep(
+                step_id=step_id,
+                state=ReasoningState.FAILED,
+                thought=f"行动执行失败: {e}",
+                action=action if 'action' in locals() else "unknown",
+                action_params=action_params if 'action_params' in locals() else {},
+                confidence=0.0,
+                duration=duration,
+                execution_success=False,
+                execution_error=str(e)
+            )
+    
+    def _format_params_for_display(self, params: Dict[str, Any]) -> str:
+        """Format parameters for user-friendly display"""
+        if not params:
+            return "无参数"
         
-        return ReasoningStep(
-            step_id=step_id,
-            state=ReasoningState.ACTING,
-            thought=f"Executing action: {action}",
-            action=action,
-            action_params=action_params,
-            confidence=0.7,
-            duration=time.time() - start_time,
-            # 🔧 NEW: Include actual execution results
-            tool_result=tool_result,
-            execution_success=execution_success,
-            execution_error=execution_error
-        )
+        formatted = {}
+        for key, value in params.items():
+            if isinstance(value, str) and len(value) > 50:
+                formatted[key] = value[:50] + "..."
+            else:
+                formatted[key] = value
+        
+        return str(formatted)
+
+    def _format_result_for_display(self, result: Any) -> str:
+        """Format tool result for user-friendly display"""
+        if isinstance(result, dict):
+            if 'content' in result:
+                content = str(result['content'])
+                if len(content) > 100:
+                    return f"文件内容 ({len(content)} 字符): {content[:100]}..."
+                return f"内容: {content}"
+            elif 'error' in result:
+                return f"错误: {result['error']}"
+            elif 'success' in result:
+                return "操作成功" if result['success'] else "操作失败"
+        elif isinstance(result, str):
+            if len(result) > 100:
+                return f"{result[:100]}..."
+            return result
+        elif isinstance(result, list):
+            return f"返回列表 ({len(result)} 项)"
+        
+        return str(type(result).__name__)
     
     async def _observing_phase(self, context: Dict[str, Any], step_id: int, action_step: ReasoningStep) -> Optional[ReasoningStep]:
         """
@@ -493,8 +573,39 @@ Respond with your analysis and reasoning.
         goal = context.get("goal", "")
         available_tools = context.get("available_tools", [])
         
-        # 🔧 NEW: Enhanced action selection with MCP tool awareness
+        # 🔧 ENHANCED: Improved action selection with better tool prioritization
         goal_lower = goal.lower()
+        
+        # Check if goal mentions web search or news/information gathering
+        if any(keyword in goal_lower for keyword in ['search', 'find', 'look', 'information', 'news', 'latest']):
+            # 🔧 PRIORITY FIX: Prioritize web search tools over file search tools
+            web_search_tools = []
+            file_search_tools = []
+            
+            for tool_name in self.available_mcp_tools:
+                tool_name_lower = tool_name.lower()
+                if any(web_keyword in tool_name_lower for web_keyword in ['google', 'web', 'http', 'internet']):
+                    web_search_tools.append(tool_name)
+                elif any(search_keyword in tool_name_lower for search_keyword in ['search', 'find', 'query']):
+                    file_search_tools.append(tool_name)
+            
+            # Prefer web search for general information gathering
+            if web_search_tools:
+                # Extract search query from goal
+                if 'search' in goal_lower:
+                    # Use the part after "search" as query
+                    query_start = goal_lower.find('search') + 6
+                    search_query = goal[query_start:].strip()
+                    if not search_query:
+                        search_query = goal
+                else:
+                    search_query = goal
+                
+                return web_search_tools[0], {"query": search_query}
+            
+            # Fall back to file search only if no web search available
+            elif file_search_tools and any(file_keyword in goal_lower for file_keyword in ['file', 'document', 'local']):
+                return file_search_tools[0], {"query": goal}
         
         # Check if the goal mentions file operations
         if any(keyword in goal_lower for keyword in ['file', 'create', 'write', 'read', 'delete']):
@@ -513,11 +624,20 @@ Respond with your analysis and reasoning.
                     elif 'read' in goal_lower:
                         return tool_name, {"path": "debug.txt"}
         
-        # Check if goal mentions search or information gathering
-        if any(keyword in goal_lower for keyword in ['search', 'find', 'look', 'information']):
+        # Check for weather queries
+        if any(keyword in goal_lower for keyword in ['weather', 'temperature', 'forecast']):
             for tool_name in self.available_mcp_tools:
-                if any(search_keyword in tool_name.lower() for search_keyword in ['search', 'find', 'query']):
-                    return tool_name, {"query": goal}
+                if 'weather' in tool_name.lower():
+                    # Extract city from goal if possible
+                    import re
+                    city_match = re.search(r'weather.*?(?:in|for|at)\s+(\w+)', goal_lower)
+                    city = city_match.group(1) if city_match else "Beijing"
+                    
+                    # Get current date
+                    from datetime import datetime
+                    date_str = datetime.now().strftime("%Y-%m-%d")
+                    
+                    return tool_name, {"city": city, "date_str": date_str}
         
         # Fallback to built-in actions
         if len(steps_taken) == 0:
