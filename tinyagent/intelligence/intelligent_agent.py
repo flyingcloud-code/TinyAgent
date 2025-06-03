@@ -6,7 +6,9 @@ Integrates all intelligence components to provide true autonomous agent behavior
 import logging
 import time
 import uuid
-from typing import Optional, Dict, Any, List
+import re
+import asyncio
+from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass
 
 from .planner import TaskPlanner
@@ -128,72 +130,191 @@ class IntelligentAgent:
         # Enhanced tool context state
         self._last_tool_context = None
         self._tool_context_cache_valid = False
+        
+        # 🔧 NEW: Tool execution capabilities
+        self._mcp_tool_executor = None  # Will be set when MCP tools are registered
+        self._available_mcp_tools = {}  # Maps tool_name -> server_name
     
-    def _build_enhanced_tool_context(self, task_hint: Optional[str] = None) -> Optional[str]:
+    def _detect_tool_query(self, message: str) -> bool:
         """
-        Build enhanced tool context using MCP context builder
+        Detect if user is asking about available tools
         
         Args:
-            task_hint: Optional hint about the task type for tool recommendation
+            message: User input message
             
         Returns:
-            Formatted tool context string or None if not available
+            True if user is asking about tools
+        """
+        tool_query_patterns = [
+            r"list.*tools?",
+            r"what tools?",
+            r"show.*tools?",
+            r"available.*tools?",
+            r"mcp.*tools?",
+            r"capabilities?",
+            r"what.*can.*do",
+            r"tools.*have",
+            r"functions.*have"
+        ]
+        
+        message_lower = message.lower()
+        return any(re.search(pattern, message_lower) for pattern in tool_query_patterns)
+    
+    async def _handle_tool_query(self) -> str:
+        """
+        Handle tool query request by returning actual MCP tools
+        
+        Returns:
+            Formatted response with actual tool list
+        """
+        logger.info("Handling tool query request")
+        
+        # Get all available tools
+        tools = await self._get_available_tools()
+        
+        if not tools:
+            return "我当前没有可用的MCP工具。请检查MCP服务器配置。"
+        
+        # Group tools by server
+        tools_by_server = {}
+        for tool in tools:
+            server = tool.get('server', 'unknown')
+            if server not in tools_by_server:
+                tools_by_server[server] = []
+            tools_by_server[server].append(tool)
+        
+        # Format response
+        response = "我当前可用的MCP工具包括：\n\n"
+        
+        for server_name, server_tools in tools_by_server.items():
+            response += f"**{server_name}服务器** ({len(server_tools)}个工具):\n"
+            for tool in server_tools:
+                tool_name = tool.get('name', 'unknown')
+                tool_desc = tool.get('description', '无描述')
+                # Truncate long descriptions
+                if len(tool_desc) > 100:
+                    tool_desc = tool_desc[:100] + "..."
+                response += f"- {tool_name}: {tool_desc}\n"
+            response += "\n"
+        
+        response += f"总计: {len(tools)}个可用工具\n\n"
+        response += "您可以直接要求我使用这些工具执行具体任务。"
+        
+        logger.info(f"Generated tool query response for {len(tools)} tools from {len(tools_by_server)} servers")
+        return response
+
+    def _build_enhanced_tool_context(self, task_hint: Optional[str] = None) -> Optional[str]:
+        """
+        Build enhanced tool context for better task understanding and planning
+        
+        Args:
+            task_hint: Optional hint about the task to help focus tool selection
+            
+        Returns:
+            Enhanced tool context string if MCP context builder is available
         """
         if not self.mcp_context_builder:
-            logger.debug("MCP context builder not available")
             return None
         
         try:
-            # Build comprehensive tool context
-            tool_context = self.mcp_context_builder.build_tool_context(task_hint=task_hint)
+            # Try to build tool context
+            tool_context = self.mcp_context_builder.build_tool_context(
+                include_performance_metrics=True,
+                include_server_status=True,
+                task_hint=task_hint
+            )
             
-            if not tool_context or not tool_context.available_tools:
-                logger.debug("No tools available in context")
+            if tool_context and tool_context.context_string:
+                self._last_tool_context = tool_context
+                self._tool_context_cache_valid = True
+                logger.debug(f"Built enhanced tool context: {len(tool_context.context_string)} chars")
+                return tool_context.context_string
+            else:
+                logger.warning("Tool context builder returned empty context")
                 return None
-            
-            # Cache the context for reuse
-            self._last_tool_context = tool_context
-            self._tool_context_cache_valid = True
-            
-            # Generate context text for the agent
-            context_text = tool_context.context_text
-            
-            # Add performance recommendations if available
-            if tool_context.recommended_tools:
-                context_text += "\n\n## Tool Recommendations:\n"
-                for category, tools in tool_context.recommended_tools.items():
-                    if tools:
-                        context_text += f"- **{category.replace('_', ' ').title()}**: {', '.join(tools)}\n"
-            
-            logger.info(f"Enhanced tool context built: {len(tool_context.available_tools)} tools, "
-                       f"{len(tool_context.server_status)} servers")
-            
-            return context_text
-            
+                
         except Exception as e:
-            logger.error(f"Error building enhanced tool context: {e}")
+            logger.warning(f"Error building enhanced tool context: {e}")
             return None
-    
+
     def get_tool_context_summary(self) -> Dict[str, Any]:
-        """
-        Get a summary of current tool context for debugging and monitoring
-        
-        Returns:
-            Dictionary with tool context summary
-        """
+        """Get summary of current tool context"""
         if not self._last_tool_context:
-            return {"status": "no_context", "tools": 0, "servers": 0}
+            return {"available": False, "reason": "No tool context built"}
         
-        context = self._last_tool_context
         return {
-            "status": "active",
-            "tools": len(context.available_tools),
-            "servers": len(context.server_status),
-            "capabilities": list(context.capabilities_summary.keys()),
-            "recommendations": {k: len(v) for k, v in context.recommended_tools.items()},
-            "last_updated": context.last_updated.isoformat(),
+            "available": True,
+            "tools_count": len(self._last_tool_context.available_tools),
+            "servers": list(self._last_tool_context.server_status.keys()),
+            "capabilities": list(self._last_tool_context.capabilities_summary.keys()),
+            "context_size": len(self._last_tool_context.context_string) if self._last_tool_context.context_string else 0,
             "cache_valid": self._tool_context_cache_valid
         }
+
+    def _create_tool_executor(self) -> Callable:
+        """
+        Create a tool executor function that can execute MCP tools
+        
+        Returns:
+            Async function that can execute tools: async def execute_tool(tool_name, params) -> result
+        """
+        async def execute_tool(tool_name: str, params: Dict[str, Any]) -> Any:
+            """
+            Execute an MCP tool with given parameters
+            
+            Args:
+                tool_name: Name of the tool to execute
+                params: Parameters for the tool execution
+                
+            Returns:
+                Tool execution result
+            """
+            try:
+                logger.info(f"Executing MCP tool: {tool_name} with params: {params}")
+                
+                # Check if we have a registered tool executor function
+                if self._mcp_tool_executor:
+                    result = await self._mcp_tool_executor(tool_name, params)
+                    logger.info(f"Tool {tool_name} executed successfully via MCP executor")
+                    return result
+                
+                # Try to execute via action executor if tool is registered there
+                if tool_name in self.action_executor.tool_registry:
+                    tool_func = self.action_executor.tool_registry[tool_name]
+                    if callable(tool_func):
+                        # Execute the tool function
+                        if asyncio.iscoroutinefunction(tool_func):
+                            result = await tool_func(**params)
+                        else:
+                            result = tool_func(**params)
+                        logger.info(f"Tool {tool_name} executed successfully via action executor")
+                        return result
+                
+                # If no direct execution method available, return a descriptive result
+                logger.warning(f"No execution method available for tool {tool_name}")
+                return f"Tool {tool_name} identified but execution method not available. Parameters: {params}"
+                
+            except Exception as e:
+                logger.error(f"Error executing tool {tool_name}: {e}")
+                raise
+        
+        return execute_tool
+    
+    def set_mcp_tool_executor(self, executor_func: Callable):
+        """
+        Set the MCP tool executor function
+        
+        Args:
+            executor_func: Function that can execute MCP tools
+                          Signature: async def execute_tool(tool_name, params) -> result
+        """
+        self._mcp_tool_executor = executor_func
+        logger.info("MCP tool executor function registered with IntelligentAgent")
+        
+        # Also register with ReasoningEngine
+        tool_executor = self._create_tool_executor()
+        self.reasoning_engine.set_tool_executor(tool_executor)
+        logger.info("Tool executor registered with ReasoningEngine")
 
     async def run(self, message: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -211,6 +332,20 @@ class IntelligentAgent:
         logger.info(f"IntelligentAgent starting: task_id={task_id}, message='{message[:100]}...'")
         
         try:
+            # 🔧 NEW: Check if user is asking about tools
+            if self._detect_tool_query(message):
+                logger.info("Detected tool query, handling directly")
+                tool_response = await self._handle_tool_query()
+                return {
+                    "success": True,
+                    "answer": tool_response,
+                    "task_plan": {"task_id": task_id, "complexity": "simple", "steps": 1},
+                    "reasoning": {"iterations": 0, "confidence": 1.0, "steps": 0},
+                    "tools_used": [],
+                    "execution_time": time.time() - start_time,
+                    "tool_context": self.get_tool_context_summary()
+                }
+            
             # 0. Build enhanced tool context for this task
             enhanced_context = self._build_enhanced_tool_context(task_hint=message)
             if enhanced_context:

@@ -5,12 +5,23 @@ Implements the core ReAct (Reasoning + Acting) loop for autonomous agent behavio
 
 import logging
 import time
-from typing import List, Dict, Any, Optional, Union
+import json
+import asyncio
+from typing import List, Dict, Any, Optional, Union, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
 logger = logging.getLogger(__name__)
 
+# Import MCP components for actual tool execution
+try:
+    from ..mcp.manager import MCPServerManager
+    from ..mcp.cache import MCPToolCache
+    MCP_AVAILABLE = True
+except ImportError:
+    MCPServerManager = None
+    MCPToolCache = None
+    MCP_AVAILABLE = False
 
 class ReasoningState(Enum):
     """States in the reasoning process"""
@@ -36,6 +47,10 @@ class ReasoningStep:
     confidence: float = 0.0
     duration: float = 0.0
     timestamp: float = field(default_factory=time.time)
+    # 🔧 NEW: Add actual execution results
+    tool_result: Optional[Any] = None
+    execution_success: bool = True
+    execution_error: Optional[str] = None
 
 
 @dataclass
@@ -57,6 +72,8 @@ class ReasoningEngine:
     This engine provides the "thinking" capability for TinyAgent, implementing
     a structured reasoning process that combines thinking, planning, acting,
     observing, and reflecting in a continuous loop until the goal is achieved.
+    
+    🔧 ENHANCED: Now includes actual MCP tool execution capabilities
     """
     
     def __init__(self, llm_agent=None, max_iterations: int = 10, confidence_threshold: float = 0.8):
@@ -73,11 +90,44 @@ class ReasoningEngine:
         self.confidence_threshold = confidence_threshold
         self.current_step = 0
         
+        # 🔧 NEW: Tool execution capabilities
+        self.mcp_manager = None
+        self.tool_cache = None
+        self.available_mcp_tools = {}  # Maps tool_name -> server_name
+        self.tool_executor = None  # Will be set by TinyAgent
+        
         logger.info(f"ReasoningEngine initialized with max_iterations={max_iterations}")
     
+    def set_tool_executor(self, tool_executor_func: Callable):
+        """
+        Set the tool executor function for actual MCP tool execution
+        
+        Args:
+            tool_executor_func: Function that can execute MCP tools
+                                Signature: async def execute_tool(tool_name, params) -> result
+        """
+        self.tool_executor = tool_executor_func
+        logger.info("Tool executor function registered with ReasoningEngine")
+    
+    def register_mcp_tools(self, mcp_tools: List[Dict[str, Any]]):
+        """
+        Register available MCP tools with the reasoning engine
+        
+        Args:
+            mcp_tools: List of MCP tool definitions
+        """
+        self.available_mcp_tools = {}
+        for tool in mcp_tools:
+            tool_name = tool.get('name')
+            server_name = tool.get('server', 'unknown')
+            if tool_name:
+                self.available_mcp_tools[tool_name] = server_name
+        
+        logger.info(f"Registered {len(self.available_mcp_tools)} MCP tools for reasoning")
+
     async def reason_and_act(self, goal: str, context: Optional[Dict[str, Any]] = None) -> ReasoningResult:
         """
-        Main ReAct loop implementation
+        Main ReAct loop implementation with actual tool execution
         
         Args:
             goal: The goal to reason about and achieve
@@ -98,7 +148,8 @@ class ReasoningEngine:
             "context": context or {},
             "steps_taken": [],
             "available_actions": self._get_available_actions(),
-            "current_state": "starting"
+            "current_state": "starting",
+            "tool_results": []  # 🔧 NEW: Track tool execution results
         }
         
         try:
@@ -116,17 +167,28 @@ class ReasoningEngine:
                 if thought_step and thought_step.state == ReasoningState.COMPLETED:
                     break
                 
-                # 2. ACTING - Execute the planned action
+                # 2. ACTING - Execute the planned action (NOW WITH REAL TOOL EXECUTION!)
                 action_step = await self._acting_phase(reasoning_context, self.current_step)
                 if action_step:
                     steps.append(action_step)
                     # Update context with action taken
                     reasoning_context["steps_taken"].append({
                         "action": action_step.action,
-                        "params": action_step.action_params
+                        "params": action_step.action_params,
+                        "tool_result": action_step.tool_result,
+                        "success": action_step.execution_success
                     })
+                    
+                    # 🔧 NEW: Add tool results to context
+                    if action_step.tool_result:
+                        reasoning_context["tool_results"].append({
+                            "step": self.current_step,
+                            "tool": action_step.action,
+                            "result": action_step.tool_result,
+                            "success": action_step.execution_success
+                        })
                 
-                # 3. OBSERVING - Analyze the results of the action
+                # 3. OBSERVING - Analyze the results of the action (NOW WITH REAL RESULTS!)
                 observation_step = await self._observing_phase(reasoning_context, self.current_step, action_step)
                 if observation_step:
                     steps.append(observation_step)
@@ -238,12 +300,45 @@ class ReasoningEngine:
     
     async def _acting_phase(self, context: Dict[str, Any], step_id: int) -> Optional[ReasoningStep]:
         """
-        ACTING phase: Execute the planned action
+        ACTING phase: Execute the planned action WITH REAL TOOL EXECUTION
+        
+        🔧 ENHANCED: Now actually executes MCP tools instead of just simulating
         """
         start_time = time.time()
         
         # Determine the action to take based on context
         action, action_params = self._select_action(context)
+        
+        # 🔧 NEW: Actually execute the tool if possible
+        tool_result = None
+        execution_success = True
+        execution_error = None
+        
+        try:
+            # Check if this is an MCP tool that can be executed
+            if action in self.available_mcp_tools and self.tool_executor:
+                logger.info(f"Executing MCP tool: {action} with params: {action_params}")
+                
+                # Execute the actual MCP tool
+                tool_result = await self.tool_executor(action, action_params)
+                execution_success = True
+                logger.info(f"Tool {action} executed successfully")
+                
+            elif action.startswith("mcp_") or action in self.available_mcp_tools:
+                # This looks like an MCP tool but we can't execute it
+                execution_error = f"MCP tool '{action}' cannot be executed (no executor available)"
+                execution_success = False
+                logger.warning(execution_error)
+                
+            else:
+                # This is a built-in action, simulate it for now
+                tool_result = f"Simulated execution of {action}"
+                logger.info(f"Simulating built-in action: {action}")
+                
+        except Exception as e:
+            execution_error = f"Tool execution failed: {str(e)}"
+            execution_success = False
+            logger.error(f"Error executing tool {action}: {e}")
         
         return ReasoningStep(
             step_id=step_id,
@@ -252,28 +347,52 @@ class ReasoningEngine:
             action=action,
             action_params=action_params,
             confidence=0.7,
-            duration=time.time() - start_time
+            duration=time.time() - start_time,
+            # 🔧 NEW: Include actual execution results
+            tool_result=tool_result,
+            execution_success=execution_success,
+            execution_error=execution_error
         )
     
     async def _observing_phase(self, context: Dict[str, Any], step_id: int, action_step: ReasoningStep) -> Optional[ReasoningStep]:
         """
-        OBSERVING phase: Analyze the results of the action
+        OBSERVING phase: Analyze the results of the action WITH REAL RESULTS
+        
+        🔧 ENHANCED: Now observes actual tool execution results
         """
         start_time = time.time()
         
-        # Simulate observing the results of the action
+        # Analyze real execution results
         if action_step and action_step.action:
-            observation = f"Action '{action_step.action}' was executed. Analyzing results..."
-            
-            # Add more sophisticated observation logic here
-            if "search" in action_step.action.lower():
-                observation += " Search completed, information gathered."
-            elif "analyze" in action_step.action.lower():
-                observation += " Analysis performed, insights extracted."
-            elif "create" in action_step.action.lower():
-                observation += " Creation task completed successfully."
+            if action_step.execution_success and action_step.tool_result:
+                # Real tool execution succeeded
+                observation = f"Action '{action_step.action}' executed successfully. "
+                
+                # Analyze the result type and content
+                result = action_step.tool_result
+                if isinstance(result, dict):
+                    if 'content' in result:
+                        content = str(result['content'])[:200]
+                        observation += f"Result: {content}..."
+                    elif 'output' in result:
+                        output = str(result['output'])[:200]
+                        observation += f"Output: {output}..."
+                    else:
+                        observation += f"Data returned: {len(str(result))} characters"
+                elif isinstance(result, str):
+                    observation += f"Result: {result[:200]}..."
+                elif isinstance(result, list):
+                    observation += f"Returned {len(result)} items"
+                else:
+                    observation += f"Result type: {type(result).__name__}"
+                    
+            elif action_step.execution_error:
+                # Tool execution failed
+                observation = f"Action '{action_step.action}' failed: {action_step.execution_error}"
+                
             else:
-                observation += " Action completed, awaiting further instructions."
+                # Simulated action
+                observation = f"Action '{action_step.action}' was simulated (no real execution available)"
         else:
             observation = "No action was taken to observe."
         
@@ -282,7 +401,7 @@ class ReasoningEngine:
             state=ReasoningState.OBSERVING,
             thought=f"Observing results of action",
             observation=observation,
-            confidence=0.6,
+            confidence=0.8 if action_step.execution_success else 0.3,  # Higher confidence for real results
             duration=time.time() - start_time
         )
     
@@ -353,22 +472,54 @@ Respond with your analysis and reasoning.
         return prompt
     
     def _get_available_actions(self) -> List[str]:
-        """Get list of available actions"""
-        return [
+        """Get list of available actions including MCP tools"""
+        built_in_actions = [
             "search_information",
-            "analyze_data",
+            "analyze_data", 
             "create_content",
             "request_clarification",
             "synthesize_results",
             "validate_answer"
         ]
+        
+        # 🔧 NEW: Add available MCP tools
+        mcp_tools = list(self.available_mcp_tools.keys())
+        
+        return built_in_actions + mcp_tools
     
     def _select_action(self, context: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
-        """Select the next action to take based on context"""
+        """Select the next action to take based on context and available tools"""
         steps_taken = context.get("steps_taken", [])
         goal = context.get("goal", "")
+        available_tools = context.get("available_tools", [])
         
-        # Simple action selection logic (can be enhanced with LLM)
+        # 🔧 NEW: Enhanced action selection with MCP tool awareness
+        goal_lower = goal.lower()
+        
+        # Check if the goal mentions file operations
+        if any(keyword in goal_lower for keyword in ['file', 'create', 'write', 'read', 'delete']):
+            # Look for filesystem tools
+            for tool_name in self.available_mcp_tools:
+                if any(fs_keyword in tool_name.lower() for fs_keyword in ['file', 'write', 'read', 'create']):
+                    if 'create' in goal_lower or 'write' in goal_lower:
+                        # Extract filename from goal
+                        import re
+                        filename_match = re.search(r'create\s+(\w+\.\w+)', goal_lower)
+                        if filename_match:
+                            filename = filename_match.group(1)
+                            return tool_name, {"path": filename, "content": "# Created by TinyAgent\n"}
+                        else:
+                            return tool_name, {"path": "debug.txt", "content": "# Created by TinyAgent\n"}
+                    elif 'read' in goal_lower:
+                        return tool_name, {"path": "debug.txt"}
+        
+        # Check if goal mentions search or information gathering
+        if any(keyword in goal_lower for keyword in ['search', 'find', 'look', 'information']):
+            for tool_name in self.available_mcp_tools:
+                if any(search_keyword in tool_name.lower() for search_keyword in ['search', 'find', 'query']):
+                    return tool_name, {"query": goal}
+        
+        # Fallback to built-in actions
         if len(steps_taken) == 0:
             return "search_information", {"query": goal}
         elif len(steps_taken) == 1:

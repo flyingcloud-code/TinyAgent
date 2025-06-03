@@ -28,7 +28,7 @@ mcp:
     - "filesystem"
     - "sequential-thinking"
     # 暂时禁用SSE服务器以避免异步生成器错误
-    # - "my-search"  
+    - "my-search"  
 
 logging:
   level: "INFO"

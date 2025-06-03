@@ -14,6 +14,7 @@ from pathlib import Path
 import os
 import uuid
 from datetime import datetime
+import warnings
 
 from ..core.config import get_config, set_profile
 from ..core.agent import create_agent, AGENTS_AVAILABLE
@@ -153,68 +154,92 @@ def status(verbose: bool, profile: Optional[str], tools: bool):
                 # Show detailed tools status with caching information
                 click.echo("  🔍 Analyzing MCP tools and cache status...")
                 try:
-                    import asyncio
-                    server_tools = asyncio.run(mcp_manager.initialize_with_caching())
-                    
-                    # Show overall statistics
-                    total_servers = len(config.mcp.servers)
-                    active_servers = len(server_tools)
-                    total_tools = sum(len(tools) for tools in server_tools.values())
-                    
-                    click.echo(f"  📊 Overall Status:")
-                    click.echo(f"    Configured servers: {total_servers}")
-                    click.echo(f"    Active servers: {active_servers}")
-                    click.echo(f"    Total available tools: {total_tools}")
-                    
-                    # Show cache status
-                    cache_stats = mcp_manager.get_cache_stats()
-                    click.echo(f"  💾 Cache Status:")
-                    click.echo(f"    Cache duration: {mcp_manager.tool_cache.cache_duration}s")
-                    click.echo(f"    Cached servers: {cache_stats['total_servers_cached']}")
-                    click.echo(f"    Cached tools: {cache_stats['total_tools_cached']}")
-                    click.echo(f"    Valid caches: {cache_stats['valid_caches']}")
-                    click.echo(f"    Cache hit rate: {cache_stats['cache_hit_rate']:.1%}")
-                    if cache_stats['cache_file_exists']:
-                        click.echo(f"    Cache file size: {cache_stats['cache_file_size']} bytes")
-                    
-                    # Show per-server status
-                    click.echo(f"  🔧 Server Details:")
-                    for server_name, server_config in config.mcp.servers.items():
-                        server_status = mcp_manager.tool_cache.get_server_status(server_name)
-                        tools_for_server = server_tools.get(server_name, [])
+                    # CRITICAL FIX: Use proper async context management to avoid generator cleanup issues
+                    async def discover_tools_safely():
+                        """Safely discover tools with proper resource management"""
+                        # Ensure MCP manager is properly initialized
+                        await mcp_manager._ensure_connection_pool()
                         
-                        if server_status:
-                            status_icon = "🟢" if server_status.status == "connected" else "🔴"
-                            click.echo(f"    {status_icon} {server_name} ({server_config.type})")
-                            click.echo(f"      Status: {server_status.status}")
-                            click.echo(f"      Tools: {len(tools_for_server)}")
-                            
-                            if server_status.last_ping_time:
-                                click.echo(f"      Last checked: {server_status.last_ping_time.strftime('%H:%M:%S')}")
-                            
-                            if verbose and tools_for_server:
-                                click.echo(f"      Available tools:")
-                                for tool in tools_for_server[:5]:  # Show first 5 tools
-                                    metrics = tool.performance_metrics
-                                    performance_info = ""
-                                    if metrics and metrics.total_calls > 0:
-                                        performance_info = f" ({metrics.total_calls} calls, {metrics.success_rate:.1%} success)"
-                                    click.echo(f"        • {tool.name}{performance_info}")
-                                
-                                if len(tools_for_server) > 5:
-                                    click.echo(f"        ... and {len(tools_for_server) - 5} more")
+                        # Start connection pool if not already started
+                        if mcp_manager.connection_pool and not mcp_manager.connection_pool._running:
+                            await mcp_manager.connection_pool.start()
                         
+                        try:
+                            # Discover tools
+                            server_tools = await mcp_manager.initialize_with_caching()
+                            return server_tools
+                        except Exception as discovery_error:
+                            # Log the error but don't fail completely
+                            click.echo(f"⚠️  Tool discovery error: {discovery_error}")
+                            return {}
+                        finally:
+                            # CRITICAL: Ensure proper cleanup of connection pool after use
+                            if mcp_manager.connection_pool and mcp_manager.connection_pool._running:
+                                try:
+                                    # Give connections time to finish current operations
+                                    await asyncio.sleep(0.1)
+                                    # Stop the connection pool gracefully
+                                    await mcp_manager.connection_pool.stop()
+                                except Exception as cleanup_error:
+                                    # Suppress cleanup errors to avoid console spam
+                                    pass
+                    
+                    # ADDITIONAL FIX: Suppress Windows pipe warnings during asyncio.run()
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", category=ResourceWarning, message=".*unclosed.*")
+                        warnings.filterwarnings("ignore", category=ResourceWarning, message=".*pipe.*")
+                        
+                        # Run the safe discovery function
+                        server_tools = asyncio.run(discover_tools_safely())
+                    
+                    if not server_tools:
+                        click.echo("No tools discovered from any server")
+                        return
+                    
+                    # Display each server with its tools
+                    total_tools = 0
+                    for server_name, tools in server_tools.items():
+                        server_config = config.mcp.servers[server_name]
+                        status = "OK" if tools else "NO_TOOLS"
+                        
+                        # Deduplicate tools by name to fix duplicate display issue
+                        unique_tools = {}
+                        for tool in tools:
+                            if tool.name not in unique_tools:
+                                unique_tools[tool.name] = tool
+                        
+                        deduped_tools = list(unique_tools.values())
+                        total_tools += len(deduped_tools)
+                        
+                        click.echo(f"[{status}] {server_name}")
+                        click.echo(f"   Type: {server_config.type}")
+                        click.echo(f"   Description: {server_config.description}")
+                        
+                        if deduped_tools:
+                            click.echo(f"   Tools ({len(deduped_tools)}):")
+                            for tool in deduped_tools:
+                                click.echo(f"     • {tool.name}")
+                                if verbose:
+                                    click.echo(f"       Description: {tool.description}")
+                                    click.echo(f"       Category: {tool.category}")
+                                    if tool.performance_metrics and tool.performance_metrics.total_calls > 0:
+                                        metrics = tool.performance_metrics
+                                        click.echo(f"       Performance: {metrics.total_calls} calls, "
+                                                 f"{metrics.success_rate:.1%} success rate, "
+                                                 f"{metrics.avg_response_time:.2f}s avg time")
                         else:
-                            click.echo(f"    🔴 {server_name} ({server_config.type}) - Not initialized")
+                            click.echo("   No tools available")
+                        
+                        click.echo()
                     
-                    # Show performance summary if available
-                    perf_summary = mcp_manager.get_performance_summary()
-                    global_perf = perf_summary.get('global_performance', {})
-                    if global_perf.get('total_calls', 0) > 0:
-                        click.echo(f"  📈 Performance Summary:")
-                        click.echo(f"    Total tool calls: {global_perf['total_calls']}")
-                        click.echo(f"    Success rate: {global_perf['success_rate']:.1%}")
-                        click.echo(f"    Avg response time: {global_perf['avg_response_time']:.2f}s")
+                    # Show cache statistics
+                    cache_stats = mcp_manager.get_cache_stats()
+                    click.echo(f"   Total tools: {total_tools}")
+                    if cache_stats.get('cache_hits', 0) > 0 or cache_stats.get('cache_misses', 0) > 0:
+                        hit_rate = cache_stats['cache_hits'] / (cache_stats['cache_hits'] + cache_stats['cache_misses']) * 100
+                        click.echo(f"   Cache hit rate: {hit_rate:.1f}%")
+                    elif 'cache_hit_rate' in cache_stats:
+                        click.echo(f"   Cache hit rate: {cache_stats['cache_hit_rate']:.1%}")
                     
                 except Exception as e:
                     click.echo(f"    ❌ Error analyzing tools: {e}")
@@ -324,9 +349,43 @@ def list_servers(show_tools: bool, verbose: bool):
             click.echo()
             
             try:
-                # Use async context for tool discovery
-                import asyncio
-                server_tools = asyncio.run(mcp_manager.initialize_with_caching())
+                # CRITICAL FIX: Use proper async context management to avoid generator cleanup issues
+                async def discover_tools_safely():
+                    """Safely discover tools with proper resource management"""
+                    # Ensure MCP manager is properly initialized
+                    await mcp_manager._ensure_connection_pool()
+                    
+                    # Start connection pool if not already started
+                    if mcp_manager.connection_pool and not mcp_manager.connection_pool._running:
+                        await mcp_manager.connection_pool.start()
+                    
+                    try:
+                        # Discover tools
+                        server_tools = await mcp_manager.initialize_with_caching()
+                        return server_tools
+                    except Exception as discovery_error:
+                        # Log the error but don't fail completely
+                        click.echo(f"⚠️  Tool discovery error: {discovery_error}")
+                        return {}
+                    finally:
+                        # CRITICAL: Ensure proper cleanup of connection pool after use
+                        if mcp_manager.connection_pool and mcp_manager.connection_pool._running:
+                            try:
+                                # Give connections time to finish current operations
+                                await asyncio.sleep(0.1)
+                                # Stop the connection pool gracefully
+                                await mcp_manager.connection_pool.stop()
+                            except Exception as cleanup_error:
+                                # Suppress cleanup errors to avoid console spam
+                                pass
+                
+                # ADDITIONAL FIX: Suppress Windows pipe warnings during asyncio.run()
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=ResourceWarning, message=".*unclosed.*")
+                    warnings.filterwarnings("ignore", category=ResourceWarning, message=".*pipe.*")
+                    
+                    # Run the safe discovery function
+                    server_tools = asyncio.run(discover_tools_safely())
                 
                 if not server_tools:
                     click.echo("No tools discovered from any server")

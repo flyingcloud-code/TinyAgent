@@ -89,23 +89,25 @@ class MCPConnectionPool:
             
         self._running = False
         
-        # Cancel background tasks
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
+        # Cancel background tasks gracefully
+        tasks_to_cancel = []
+        if self._cleanup_task and not self._cleanup_task.done():
+            tasks_to_cancel.append(self._cleanup_task)
+        if self._health_check_task and not self._health_check_task.done():
+            tasks_to_cancel.append(self._health_check_task)
         
-        if self._health_check_task:
-            self._health_check_task.cancel()
+        # Cancel tasks and wait for them to complete
+        for task in tasks_to_cancel:
+            task.cancel()
             try:
-                await self._health_check_task
-            except asyncio.CancelledError:
-                pass
+                await asyncio.wait_for(task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                logger.debug(f"Background task cancelled successfully")
+            except Exception as e:
+                logger.warning(f"Error cancelling background task: {e}")
         
-        # Close all connections
-        await self._close_all_connections()
+        # Close all connections with improved error handling
+        await self._close_all_connections_safely()
         
         logger.info("Connection pool manager stopped")
     
@@ -197,7 +199,7 @@ class MCPConnectionPool:
         return None
     
     async def _create_connection(self, server_config: MCPServerConfig) -> Optional[Any]:
-        """Create a new MCP server connection"""
+        """Create a new MCP server connection with improved Windows compatibility"""
         try:
             # Import MCP classes dynamically
             from agents.mcp import MCPServerStdio, MCPServerSse, MCPServerStreamableHttp
@@ -240,14 +242,33 @@ class MCPConnectionPool:
             else:
                 raise ValueError(f"Unsupported server type: {server_config.type}")
             
-            # Connect with timeout
-            connected_server = await asyncio.wait_for(
-                server.__aenter__(),
-                timeout=self.config.connection_timeout
-            )
-            
-            logger.info(f"Created new connection for {server_config.name}")
-            return connected_server
+            # WINDOWS COMPATIBILITY FIX: Connect with proper error handling for stdio pipes
+            try:
+                # Connect with timeout and proper error handling
+                connected_server = await asyncio.wait_for(
+                    server.__aenter__(),
+                    timeout=self.config.connection_timeout
+                )
+                
+                logger.info(f"Created new connection for {server_config.name} ({server_config.type})")
+                
+                # For stdio connections on Windows, ensure process is properly managed
+                if server_config.type == "stdio" and hasattr(connected_server, '_transport'):
+                    # Set proper process handling for Windows
+                    if hasattr(connected_server._transport, 'get_returncode'):
+                        returncode = connected_server._transport.get_returncode()
+                        if returncode is not None:
+                            logger.warning(f"Process for {server_config.name} exited with code {returncode}")
+                            return None
+                
+                return connected_server
+                
+            except asyncio.TimeoutError:
+                logger.error(f"Connection timeout for {server_config.name} after {self.config.connection_timeout}s")
+                return None
+            except Exception as conn_error:
+                logger.error(f"Connection error for {server_config.name}: {conn_error}")
+                return None
             
         except Exception as e:
             logger.error(f"Failed to create connection for {server_config.name}: {e}")
@@ -280,24 +301,88 @@ class MCPConnectionPool:
     async def _close_connection(self, connection_info: ConnectionInfo):
         """Close a single connection"""
         try:
-            if hasattr(connection_info.connection, '__aexit__'):
-                await connection_info.connection.__aexit__(None, None, None)
-            elif hasattr(connection_info.connection, 'close'):
-                await connection_info.connection.close()
+            # CRITICAL FIX: Ensure proper async context exit
+            # Handle MCP client connections which are async context managers
+            connection = connection_info.connection
             
-            logger.debug(f"Closed connection for {connection_info.server_name}")
+            # First try the standard async context manager protocol
+            if hasattr(connection, '__aexit__'):
+                try:
+                    await connection.__aexit__(None, None, None)
+                    logger.debug(f"Properly closed async context for {connection_info.server_name}")
+                except Exception as exit_error:
+                    logger.warning(f"Error during __aexit__ for {connection_info.server_name}: {exit_error}")
+                    
+                    # If __aexit__ fails, try alternative cleanup methods
+                    if hasattr(connection, 'close'):
+                        try:
+                            if asyncio.iscoroutinefunction(connection.close):
+                                await connection.close()
+                            else:
+                                connection.close()
+                        except Exception as close_error:
+                            logger.warning(f"Error during close() for {connection_info.server_name}: {close_error}")
+            
+            # For connections that don't have __aexit__, try close() method
+            elif hasattr(connection, 'close'):
+                try:
+                    if asyncio.iscoroutinefunction(connection.close):
+                        await connection.close()
+                    else:
+                        connection.close()
+                    logger.debug(f"Closed connection for {connection_info.server_name}")
+                except Exception as close_error:
+                    logger.warning(f"Error during close() for {connection_info.server_name}: {close_error}")
+            
+            # Mark connection as closed
+            connection_info.is_active = False
+            
         except Exception as e:
             logger.warning(f"Error closing connection for {connection_info.server_name}: {e}")
+            # Ensure connection is marked as inactive even if cleanup fails
+            connection_info.is_active = False
     
-    async def _close_all_connections(self):
-        """Close all connections in all pools"""
-        for server_name, pool in self._pools.items():
-            for conn_info in pool:
-                await self._close_connection(conn_info)
-            pool.clear()
-        
-        self._pools.clear()
-        logger.info("All connections closed")
+    async def _close_all_connections_safely(self):
+        """Safely close all connections in all pools with improved error handling"""
+        try:
+            # Close connections in parallel for better performance
+            close_tasks = []
+            for server_name, pool in self._pools.items():
+                for conn_info in pool:
+                    if conn_info.is_active:
+                        close_tasks.append(self._close_connection_with_timeout(conn_info))
+            
+            # Wait for all closures to complete with timeout
+            if close_tasks:
+                await asyncio.wait_for(asyncio.gather(*close_tasks, return_exceptions=True), timeout=5.0)
+            
+            # Clear pools and locks
+            self._pools.clear()
+            self._pool_locks.clear()
+            
+            logger.debug("All connections safely closed")
+            
+        except asyncio.TimeoutError:
+            logger.warning("Connection closure timed out, forcing cleanup")
+            # Force clear even if some connections didn't close properly
+            self._pools.clear()
+            self._pool_locks.clear()
+        except Exception as e:
+            logger.error(f"Error during safe connection closure: {e}")
+            # Ensure cleanup even if there were errors
+            self._pools.clear()
+            self._pool_locks.clear()
+    
+    async def _close_connection_with_timeout(self, connection_info: ConnectionInfo):
+        """Close a connection with timeout to prevent hanging"""
+        try:
+            await asyncio.wait_for(self._close_connection(connection_info), timeout=2.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"Connection closure timed out for {connection_info.server_name}, marking as inactive")
+            connection_info.is_active = False
+        except Exception as e:
+            logger.warning(f"Error closing connection for {connection_info.server_name}: {e}")
+            connection_info.is_active = False
     
     async def _cleanup_loop(self):
         """Background task to cleanup idle and failed connections"""

@@ -2023,6 +2023,11 @@ class TinyAgent:
                 tinyagent_config=self.config  # Pass TinyAgent config for LLM settings
             )
             
+            # 🔧 NEW: Register MCP tool executor with IntelligentAgent
+            mcp_tool_executor = self._create_mcp_tool_executor()
+            self._intelligent_agent.set_mcp_tool_executor(mcp_tool_executor)
+            log_technical("info", "MCP tool executor registered with IntelligentAgent")
+            
             # Initialize Enhanced MCP context builder if available
             try:
                 # Import enhanced MCP context builder components
@@ -2076,6 +2081,113 @@ class TinyAgent:
             log_technical("info", "IntelligentAgent created and initialized with enhanced MCP support")
         
         return self._intelligent_agent
+
+    def _create_mcp_tool_executor(self):
+        """
+        Create MCP tool executor function for IntelligentAgent
+        
+        Returns:
+            Async function that can execute MCP tools: execute_tool(tool_name, params) -> result
+        """
+        async def execute_mcp_tool(tool_name: str, params: Dict[str, Any]) -> Any:
+            """
+            Execute an MCP tool using TinyAgent's connection management
+            
+            Args:
+                tool_name: Name of the tool to execute
+                params: Parameters for the tool execution
+                
+            Returns:
+                Tool execution result
+            """
+            try:
+                log_technical("info", f"MCP tool executor: executing {tool_name} with params: {params}")
+                
+                # Ensure MCP connections are established
+                connected_servers = await self._ensure_mcp_connections()
+                
+                if not connected_servers:
+                    raise RuntimeError("No MCP servers available for tool execution")
+                
+                # Find which server has this tool
+                target_server = None
+                server_name = None
+                
+                # Check each connected server for the tool
+                for srv_name, connection in self._persistent_connections.items():
+                    try:
+                        if hasattr(connection, 'list_tools'):
+                            server_tools = await connection.list_tools()
+                            if hasattr(server_tools, 'tools'):
+                                for tool in server_tools.tools:
+                                    if tool.name == tool_name:
+                                        target_server = connection
+                                        server_name = srv_name
+                                        break
+                            if target_server:
+                                break
+                    except Exception as e:
+                        log_technical("warning", f"Error checking tools for server {srv_name}: {e}")
+                        continue
+                
+                if not target_server:
+                    # Return descriptive message rather than failing
+                    available_tools = []
+                    for srv_name, connection in self._persistent_connections.items():
+                        try:
+                            if hasattr(connection, 'list_tools'):
+                                server_tools = await connection.list_tools()
+                                if hasattr(server_tools, 'tools'):
+                                    available_tools.extend([t.name for t in server_tools.tools])
+                        except:
+                            pass
+                    
+                    log_technical("warning", f"Tool {tool_name} not found in any connected server. Available: {available_tools}")
+                    return f"Tool '{tool_name}' not found. Available tools: {', '.join(available_tools[:10])}"
+                
+                # Execute the tool using the MCP protocol
+                log_technical("info", f"Executing {tool_name} on server {server_name}")
+                
+                # Create proper MCP call_tool request
+                from agents.mcp import CallToolRequest
+                
+                tool_request = CallToolRequest(
+                    name=tool_name,
+                    arguments=params or {}
+                )
+                
+                # Execute the tool
+                result = await target_server.call_tool(tool_request)
+                
+                if hasattr(result, 'content'):
+                    # Extract the actual content
+                    content = result.content
+                    if isinstance(content, list) and len(content) > 0:
+                        # Get the first content item
+                        content_item = content[0]
+                        if hasattr(content_item, 'text'):
+                            actual_result = content_item.text
+                        else:
+                            actual_result = str(content_item)
+                    else:
+                        actual_result = str(content)
+                else:
+                    actual_result = str(result)
+                
+                log_technical("info", f"Tool {tool_name} executed successfully: {actual_result[:200]}...")
+                log_tool(f"MCP tool executed: {server_name}.{tool_name} -> {len(actual_result)} chars")
+                
+                return actual_result
+                
+            except Exception as e:
+                error_msg = f"Error executing MCP tool {tool_name}: {str(e)}"
+                log_technical("error", error_msg)
+                log_tool(f"MCP tool execution failed: {tool_name} -> {str(e)}")
+                
+                # Return error information rather than raising
+                return f"Tool execution failed: {str(e)}"
+        
+        return execute_mcp_tool
 
 def create_agent(
     name: Optional[str] = None,
