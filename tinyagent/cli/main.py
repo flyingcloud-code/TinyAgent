@@ -62,8 +62,9 @@ def cli(verbose: bool, profile: Optional[str], config_dir: Optional[str]):
 @click.option('--instructions', '-i', help='Custom instructions for the agent')
 @click.option('--output', '-o', type=click.Path(), help='Save output to file')
 @click.option('--api-key', help='OpenAI API key (overrides environment)')
+@click.option('--max-turns', type=int, default=25, help='Maximum turns for agent execution (default: 25)')
 def run(prompt: str, model: Optional[str], instructions: Optional[str], 
-        output: Optional[str], api_key: Optional[str]):
+        output: Optional[str], api_key: Optional[str], max_turns: int):
     """Run TinyAgent with a single task."""
     try:
         # 使用新的run_agent函数，它包含了完整的日志追踪
@@ -71,7 +72,8 @@ def run(prompt: str, model: Optional[str], instructions: Optional[str],
             task=prompt,
             model=model,
             instructions=instructions,
-            api_key=api_key
+            api_key=api_key,
+            max_turns=max_turns
         )
         
         # 处理输出
@@ -738,21 +740,41 @@ def run_agent(task: str, **kwargs):
         log_technical("info", f"Agent config: {agent.config.agent.name}")
         log_agent("Processing your request...")
         
-        # 运行Agent
-        result = agent.run_sync(task, **kwargs)
+        # 使用流式输出运行Agent (与交互模式保持一致)
+        log_technical("info", f"Running agent with message: {task}...")
+        log_technical("info", f"Using streaming output mode")
         
-        # 处理结果
-        if hasattr(result, 'final_output'):
-            response_text = result.final_output
-        else:
-            response_text = str(result)
+        # 显示开始状态
+        print("\n>>  ", end="", flush=True)
         
-        # Display the agent's response to the user
-        if response_text:
-            log_user(f"\n{response_text}")
+        # 运行Agent - 使用流式输出
+        response_text = ""
+        try:
+            for chunk in agent.run_stream_sync(task, **kwargs):
+                if chunk and not chunk.startswith("[ERROR]"):
+                    print(chunk, end="", flush=True)
+                    response_text += chunk
+                elif chunk.startswith("[ERROR]"):
+                    print(f"\n{chunk}")
+                    response_text = chunk
+                    break
+            
+            print()  # 新行
+            
+        except Exception as e:
+            log_technical("warning", f"Streaming failed, falling back to non-streaming: {e}")
+            # 如果流式输出失败，回退到非流式
+            result = agent.run_sync(task, **kwargs)
+            if hasattr(result, 'final_output'):
+                response_text = result.final_output
+            else:
+                response_text = str(result)
+            
+            if response_text:
+                print(f"\n{response_text}")
         
         log_agent("Task completed successfully")
-        log_user("[OK] Task completed!")
+        log_user(">> [OK] Task completed!")
         
         # Run 结束日志 (成功)
         run_end_time = datetime.now()
@@ -766,7 +788,12 @@ def run_agent(task: str, **kwargs):
         log_technical("info", f"Response Length: {len(response_text)} characters")
         log_technical("info", f"{'='*50}")
         
-        return result
+        # 创建结果对象返回
+        class StreamingResult:
+            def __init__(self, output):
+                self.final_output = output
+        
+        return StreamingResult(response_text)
         
     except Exception as e:
         # Run 结束日志 (失败)

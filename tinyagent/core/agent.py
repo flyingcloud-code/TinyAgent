@@ -1855,11 +1855,18 @@ class TinyAgent:
             # Get the agent with MCP tools
             agent = self.get_agent()
             
+            # Filter out parameters that Runner.run_streamed doesn't accept
+            filtered_kwargs = {}
+            supported_params = ['max_turns', 'response_format', 'temperature', 'max_tokens']
+            for key, value in kwargs.items():
+                if key in supported_params:
+                    filtered_kwargs[key] = value
+            
             # Use streaming API with MCP tools
             result = Runner.run_streamed(
                 starting_agent=agent,
                 input=message,
-                **kwargs
+                **filtered_kwargs
             )
             
             collected_content = ""
