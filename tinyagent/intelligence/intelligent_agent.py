@@ -538,6 +538,7 @@ Be methodical, focused, and goal-oriented in your reasoning process."""
                 context=planning_context
             )
             logger.info(f"Task planned: {task_plan.complexity.value}, {len(task_plan.steps)} steps")
+            logger.info(f"Task plan details: {task_plan}")
             
             # Update conversation memory with task plan
             # First create the task context if it doesn't exist
@@ -907,3 +908,210 @@ Be methodical, focused, and goal-oriented in your reasoning process."""
         self.task_planner.planning_agent = llm_agent
         self.reasoning_engine.llm_agent = llm_agent
         logger.info("LLM agent updated for all intelligence components") 
+
+    async def run_stream(self, message: str, context: Optional[Dict[str, Any]] = None):
+        """
+        Execute intelligent agent workflow with streaming output for real-time feedback
+        
+        Args:
+            message: User input message
+            context: Optional additional context
+            
+        Yields:
+            Real-time status updates and progress from each sub-component
+        """
+        start_time = time.time()
+        task_id = str(uuid.uuid4())
+        
+        yield f"🧠 **IntelligentAgent 启动中** (任务ID: {task_id[:8]})\n"
+        yield f"📝 用户请求: {message[:100]}{'...' if len(message) > 100 else ''}\n"
+        yield f"⏰ 开始时间: {time.strftime('%H:%M:%S')}\n\n"
+        
+        try:
+            # 🔧 NEW: Check if user is asking about tools
+            if self._detect_tool_query(message):
+                yield "🔧 **检测到工具查询请求**\n"
+                yield "📊 正在收集可用工具信息...\n"
+                tool_response = await self._handle_tool_query()
+                yield f"✅ **工具查询完成**\n\n{tool_response}\n"
+                return
+            
+            # 0. Build enhanced tool context for this task
+            yield "🔧 **构建增强工具上下文**\n"
+            enhanced_context = self._build_enhanced_tool_context(task_hint=message)
+            if enhanced_context:
+                yield "✅ 增强工具上下文构建完成\n"
+            else:
+                yield "⚠️ 工具上下文构建跳过\n"
+            yield "\n"
+            
+            # 1. Add message to conversation memory
+            yield "💭 **添加到对话记忆**\n"
+            conversation_turn = self.conversation_memory.add_exchange(
+                user_input=message,
+                agent_response="",  # Will be updated later
+                task_id=task_id
+            )
+            yield f"✅ 已添加到对话记忆: 轮次 {conversation_turn}\n\n"
+            
+            # 2. Task Planning - Stream planning process
+            yield "📋 **任务规划阶段**\n"
+            yield "🎯 分析任务复杂度和所需步骤...\n"
+            
+            planning_context = context or {}
+            if enhanced_context:
+                planning_context["available_tools_context"] = enhanced_context
+                planning_context["tool_summary"] = self.get_tool_context_summary()
+                yield "📊 工具上下文已加入规划考虑\n"
+            
+            task_plan = await self.task_planner.create_plan(
+                task_description=message,
+                context=planning_context
+            )
+            
+            yield f"✅ **任务规划完成**\n"
+            yield f"   📊 复杂度: {task_plan.complexity.value}\n"
+            yield f"   📝 步骤数: {len(task_plan.steps)}\n"
+            yield f"   ⏱️ 预计时长: {task_plan.total_estimated_duration}秒\n"
+            
+            # Show plan steps
+            for i, step in enumerate(task_plan.steps, 1):
+                yield f"   {i}. {step.description}\n"
+            yield "\n"
+            
+            # Update conversation memory with task plan
+            task_context = self.conversation_memory.create_task_context(
+                task_id=task_plan.task_id,
+                initial_request=message,
+                metadata={
+                    "complexity": task_plan.complexity.value,
+                    "plan_steps": [step.description for step in task_plan.steps],
+                    "estimated_duration": task_plan.total_estimated_duration,
+                    "tool_context_available": enhanced_context is not None
+                }
+            )
+            
+            # 3. Tool Selection - Stream tool selection process
+            yield "🔧 **工具选择阶段**\n"
+            yield "🔍 分析可用工具并选择合适的工具...\n"
+            
+            available_tools = await self._get_available_tools()
+            
+            # Enhance available tools with MCP context information
+            if self._last_tool_context:
+                for mcp_tool in self._last_tool_context.available_tools:
+                    available_tools.append({
+                        "name": mcp_tool.name,
+                        "description": mcp_tool.description,
+                        "type": "mcp",
+                        "server": mcp_tool.server_name,
+                        "category": mcp_tool.category,
+                        "performance": mcp_tool.performance_metrics.__dict__ if mcp_tool.performance_metrics else {}
+                    })
+            
+            tool_selection = await self.tool_selector.select_tools_for_task(
+                task_description=message,
+                available_tools=available_tools,
+                task_context=task_context
+            )
+            
+            yield f"✅ **工具选择完成**\n"
+            if tool_selection.selected_tools:
+                yield f"🔧 已选择工具: {', '.join(tool_selection.selected_tools)}\n"
+            else:
+                yield "ℹ️ 未选择特定工具，将使用通用推理\n"
+            yield "\n"
+            
+            # 4. Reasoning and Acting - Stream ReAct loop with real-time updates
+            yield "🧠 **推理与行动阶段 (ReAct循环)**\n"
+            yield "🔄 开始智能推理循环...\n\n"
+            
+            reasoning_context = {
+                "task_plan": task_plan,
+                "selected_tools": tool_selection.selected_tools,
+                "available_tools": available_tools,
+                "conversation_context": self.conversation_memory.get_relevant_context(message),
+                "original_message": message,
+                "enhanced_tool_context": enhanced_context,
+                "tool_context_summary": self.get_tool_context_summary()
+            }
+            
+            # Stream the reasoning process
+            reasoning_result = None
+            async for reasoning_update in self.reasoning_engine.reason_and_act_stream(
+                goal=message,
+                context=reasoning_context
+            ):
+                # Forward reasoning updates to user
+                yield reasoning_update
+            
+            # Get final reasoning result
+            reasoning_result = await self.reasoning_engine.get_last_result()
+            
+            yield f"\n🎯 **推理循环完成**\n"
+            yield f"   ✅ 成功: {reasoning_result.success}\n"
+            yield f"   🔄 迭代次数: {reasoning_result.iterations}\n"
+            yield f"   🎲 置信度: {reasoning_result.confidence:.2f}\n"
+            yield f"   ⏱️ 总耗时: {reasoning_result.total_duration:.2f}秒\n\n"
+            
+            # 5. Result Observation and Learning
+            if self.config.enable_learning:
+                yield "📊 **结果观察与学习阶段**\n"
+                for i, step in enumerate(reasoning_result.steps):
+                    if step.action and step.observation:
+                        yield f"🔍 观察步骤 {i+1}: {step.action}\n"
+                        observation = await self.result_observer.observe_result(
+                            action_id=f"reasoning_step_{i}",
+                            result=step.observation,
+                            expected_outcome=step.thought,
+                            execution_time=step.duration,
+                            action_name=step.action
+                        )
+                        yield f"   📈 成功评估: {observation.success_assessment}\n"
+                        yield f"   🎲 置信度: {observation.confidence:.2f}\n"
+                yield "\n"
+            
+            # 6. Update conversation memory with results
+            final_response = reasoning_result.final_answer or "任务完成"
+            self.conversation_memory.add_exchange(
+                user_input=message,
+                agent_response=final_response,
+                tools_used=tool_selection.selected_tools,
+                execution_time=time.time() - start_time,
+                task_id=task_plan.task_id
+            )
+            
+            # Update task completion status
+            self.conversation_memory.update_task_context(
+                task_id=task_plan.task_id,
+                status="completed" if reasoning_result.success else "failed",
+                metadata={
+                    "success": reasoning_result.success,
+                    "result": reasoning_result.final_answer,
+                    "execution_time": reasoning_result.total_duration,
+                    "tool_context_used": enhanced_context is not None
+                }
+            )
+            
+            # 7. Final summary
+            execution_time = time.time() - start_time
+            yield "🎉 **任务执行总结**\n"
+            yield f"   ✅ 执行状态: {'成功' if reasoning_result.success else '失败'}\n"
+            yield f"   ⏱️ 总执行时间: {execution_time:.2f}秒\n"
+            yield f"   🔧 使用工具: {len(tool_selection.selected_tools)}个\n"
+            yield f"   💭 对话轮次: {conversation_turn}\n"
+            yield f"   📊 工具上下文: {'已使用' if enhanced_context else '未使用'}\n\n"
+            
+            yield f"💬 **最终回答**:\n{reasoning_result.final_answer}\n"
+            
+        except Exception as e:
+            yield f"\n❌ **执行失败**: {str(e)}\n"
+            yield f"⏱️ 失败时间: {time.time() - start_time:.2f}秒\n"
+            
+            # Add error to conversation memory
+            error_message = f"执行失败: {str(e)}"
+            self.conversation_memory.add_exchange(
+                user_input=message,
+                agent_response=error_message,
+                execution_time=time.time() - start_time
+            ) 

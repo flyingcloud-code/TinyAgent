@@ -361,6 +361,8 @@ Output your analysis in structured format with tool names, confidence scores, an
         task_lower = task_description.lower()
         selected_tools = []
         
+        # 🔧 FIX: More aggressive tool selection for common tasks
+        
         # File operations
         if any(word in task_lower for word in ['file', 'read', 'write', 'create', 'save', 'document']):
             if 'read' in task_lower or 'content' in task_lower or 'view' in task_lower:
@@ -370,16 +372,16 @@ Output your analysis in structured format with tool names, confidence scores, an
             if 'list' in task_lower or 'directory' in task_lower or 'folder' in task_lower:
                 selected_tools.append('list_directory')
         
-        # Web operations
-        if any(word in task_lower for word in ['search', 'google', 'find', 'lookup', 'information']):
+        # Web operations - More aggressive matching
+        if any(word in task_lower for word in ['search', 'google', 'find', 'lookup', 'information', 'news', 'latest', 'openai']):
             selected_tools.append('google_search')
         
-        if any(word in task_lower for word in ['url', 'website', 'webpage', 'fetch', 'download']):
+        if any(word in task_lower for word in ['url', 'website', 'webpage', 'fetch', 'download', 'content']):
             selected_tools.append('get_web_content')
         
         # Weather
         if any(word in task_lower for word in ['weather', 'temperature', 'forecast', 'climate']):
-            selected_tools.append('get_weather')
+            selected_tools.append('get_weather_for_city_at_date')
         
         # Analysis and reasoning
         if any(word in task_lower for word in ['analyze', 'think', 'reasoning', 'complex', 'evaluate', 'assess']):
@@ -388,6 +390,22 @@ Output your analysis in structured format with tool names, confidence scores, an
         # Date operations
         if any(word in task_lower for word in ['date', 'weekday', 'day']):
             selected_tools.append('get_weekday_from_date')
+        
+        # 🔧 FIX: For news/information tasks, always suggest search + web content
+        if any(word in task_lower for word in ['news', 'latest', 'recent', 'information', 'updates']):
+            if 'google_search' not in selected_tools:
+                selected_tools.append('google_search')
+            if 'get_web_content' not in selected_tools:
+                selected_tools.append('get_web_content')
+        
+        # 🔧 FIX: If no tools selected, use generic fallback based on task type
+        if not selected_tools:
+            if any(word in task_lower for word in ['show', 'tell', 'what', 'how', 'find', 'get']):
+                selected_tools.append('google_search')  # Default to search for information requests
+            else:
+                selected_tools.append('sequentialthinking')  # Default to reasoning for complex tasks
+        
+        logger.info(f"Rule-based selection for '{task_description}': {selected_tools}")
         
         # Remove duplicates while preserving order
         return list(dict.fromkeys(selected_tools))

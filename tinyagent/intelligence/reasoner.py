@@ -81,9 +81,9 @@ class ReasoningEngine:
         Initialize ReasoningEngine
         
         Args:
-            llm_agent: Agent instance for LLM reasoning
-            max_iterations: Maximum number of ReAct iterations
-            confidence_threshold: Minimum confidence for completion
+            llm_agent: LLM agent for reasoning
+            max_iterations: Maximum reasoning iterations
+            confidence_threshold: Confidence threshold for completion
         """
         self.llm_agent = llm_agent
         self.max_iterations = max_iterations
@@ -91,10 +91,11 @@ class ReasoningEngine:
         self.current_step = 0
         
         # 🔧 NEW: Tool execution capabilities
-        self.mcp_manager = None
-        self.tool_cache = None
+        self.tool_executor = None  # Function to execute tools
         self.available_mcp_tools = {}  # Maps tool_name -> server_name
-        self.tool_executor = None  # Will be set by TinyAgent
+        
+        # 🔧 NEW: Store last result for streaming access
+        self._last_result = None
         
         logger.info(f"ReasoningEngine initialized with max_iterations={max_iterations}")
     
@@ -301,13 +302,14 @@ class ReasoningEngine:
     async def _acting_phase(self, context: Dict[str, Any], step_id: int) -> Optional[ReasoningStep]:
         """
         ACTING - Execute the planned action with actual MCP tool execution
+        (Non-streaming version for compatibility)
         
         Args:
             context: Reasoning context
             step_id: Current step ID
             
         Returns:
-            ReasoningStep with action results (NOW WITH REAL TOOL EXECUTION!)
+            ReasoningStep with action results
         """
         try:
             # Determine the action to take
@@ -316,32 +318,19 @@ class ReasoningEngine:
             if not action:
                 return None
             
-            # 🔧 ENHANCED: Display reasoning process in Chinese
-            print(f"\n🧠 **推理阶段 {step_id} - 行动执行**")
-            print(f"🎯 计划行动: {action}")
-            print(f"📋 行动参数: {self._format_params_for_display(action_params)}")
-            print("-" * 60)
-            
             step_start = time.time()
             
-            # 🔧 NEW: Execute actual MCP tool if tool executor is available
+            # Execute actual MCP tool if tool executor is available
             tool_result = None
             execution_success = True
             execution_error = None
             
             if self.tool_executor and action in self.available_mcp_tools:
                 # This is an MCP tool - execute it for real!
-                print(f"🔧 执行MCP工具: {action}")
-                print(f"🖥️  服务器: {self.available_mcp_tools[action]}")
-                
                 try:
                     start_time = time.time()
                     tool_result = await self.tool_executor(action, action_params)
                     execution_time = time.time() - start_time
-                    
-                    print(f"✅ 工具执行成功!")
-                    print(f"📊 执行结果: {self._format_result_for_display(tool_result)}")
-                    print(f"⏱️  执行耗时: {execution_time:.2f}秒")
                     
                     logger.info(f"Successfully executed MCP tool {action} in {execution_time:.2f}s")
                     
@@ -350,11 +339,9 @@ class ReasoningEngine:
                     execution_error = str(e)
                     tool_result = f"工具执行失败: {e}"
                     
-                    print(f"❌ 工具执行失败: {e}")
                     logger.error(f"Failed to execute MCP tool {action}: {e}")
             else:
                 # This is a reasoning action or tool executor not available
-                print(f"💭 执行推理行动: {action}")
                 tool_result = f"推理行动 '{action}' 已计划执行"
                 logger.info(f"Planned reasoning action: {action}")
             
@@ -375,17 +362,11 @@ class ReasoningEngine:
                 execution_error=execution_error
             )
             
-            print(f"✅ 行动阶段完成 (耗时: {duration:.2f}秒)")
-            print("=" * 60)
-            
             return action_step
             
         except Exception as e:
             logger.error(f"Error in acting phase: {e}")
             duration = time.time() - step_start if 'step_start' in locals() else 0
-            
-            print(f"❌ 行动阶段失败: {e}")
-            print("=" * 60)
             
             return ReasoningStep(
                 step_id=step_id,
@@ -651,13 +632,27 @@ Respond with your analysis and reasoning.
     
     def _analyze_completion(self, thought: str, context: Dict[str, Any]) -> bool:
         """Analyze if the goal has been completed based on thought"""
+        # 🔧 FIX: More strict completion analysis to prevent early termination
         completion_indicators = [
-            "goal achieved", "task completed", "answer found", 
-            "objective met", "done", "finished", "complete"
+            "goal completely achieved", "task fully completed", "final answer provided", 
+            "objective successfully met", "all steps completed", "finished successfully"
         ]
         
         thought_lower = thought.lower()
-        return any(indicator in thought_lower for indicator in completion_indicators)
+        
+        # 🔧 FIX: Only consider completion if multiple steps have been taken
+        steps_taken = len(context.get("steps_taken", []))
+        if steps_taken < 2:  # Require at least 2 action steps before considering completion
+            return False
+        
+        # 🔧 FIX: Require explicit completion indicators, not just partial matches
+        explicit_completion = any(indicator in thought_lower for indicator in completion_indicators)
+        
+        # 🔧 FIX: Additional check - must have actual tool results for completion
+        tool_results = context.get("tool_results", [])
+        has_meaningful_results = len(tool_results) > 0
+        
+        return explicit_completion and has_meaningful_results
     
     def _estimate_confidence(self, thought: str) -> float:
         """Estimate confidence level from thought content"""
@@ -672,14 +667,19 @@ Respond with your analysis and reasoning.
             if word in thought_lower:
                 return confidence
         
-        return 0.5  # Default confidence
+        # 🔧 FIX: Lower default confidence to prevent early termination
+        return 0.4  # Default confidence (was 0.5, now lower to be more conservative)
     
     def _evaluate_goal_achievement(self, context: Dict[str, Any], observation_step: ReasoningStep) -> bool:
         """Evaluate if the goal has been achieved based on observations"""
         steps_taken = len(context.get("steps_taken", []))
+        tool_results = context.get("tool_results", [])
         
-        # Simple heuristic: if we've taken enough steps and have observations
-        if steps_taken >= 2 and observation_step and observation_step.observation:
+        # 🔧 FIX: More strict evaluation - require multiple successful tool executions
+        successful_tool_executions = sum(1 for result in tool_results if result.get("success", False))
+        
+        # Simple heuristic: if we've taken enough steps and have successful tool results
+        if steps_taken >= 3 and successful_tool_executions >= 2 and observation_step and observation_step.observation:
             return True
         
         return False
@@ -718,3 +718,217 @@ Respond with your analysis and reasoning.
                 summary += f"   Observation: {step.observation[:100]}...\n"
         
         return summary 
+
+    async def reason_and_act_stream(self, goal: str, context: Optional[Dict[str, Any]] = None):
+        """
+        Main ReAct loop implementation with streaming output for real-time feedback
+        
+        Args:
+            goal: The goal to reason about and achieve
+            context: Additional context for reasoning
+            
+        Yields:
+            Real-time updates from each reasoning step
+        """
+        start_time = time.time()
+        
+        steps = []
+        self.current_step = 0
+        
+        # Initialize reasoning context
+        reasoning_context = {
+            "goal": goal,
+            "context": context or {},
+            "steps_taken": [],
+            "available_actions": self._get_available_actions(),
+            "current_state": "starting",
+            "tool_results": []
+        }
+        
+        yield f"🔄 **ReAct推理循环开始**\n"
+        yield f"🎯 目标: {goal}\n"
+        yield f"🎛️ 最大迭代次数: {self.max_iterations}\n"
+        yield f"📊 置信度阈值: {self.confidence_threshold}\n"
+        
+        try:
+            # Main ReAct loop with streaming updates
+            while self.current_step < self.max_iterations:
+                self.current_step += 1
+                step_start = time.time()
+                
+                yield f"\n📍 **第 {self.current_step} 轮推理循环**\n"
+                
+                # 1. THINKING - Analyze current situation and plan next action
+                yield f"🤔 **思考阶段**: 分析当前情况并规划下一步行动...\n"
+                thought_step = await self._thinking_phase(reasoning_context, self.current_step)
+                if thought_step:
+                    steps.append(thought_step)
+                    yield f"💭 思考结果: {thought_step.thought[:200]}{'...' if len(thought_step.thought) > 200 else ''}\n"
+                    yield f"🎲 思考置信度: {thought_step.confidence:.2f}\n"
+                
+                # Check if reasoning determined completion
+                if thought_step and thought_step.state == ReasoningState.COMPLETED:
+                    yield f"✅ **推理完成**: 目标已达到\n"
+                    break
+                
+                # 2. ACTING - Execute the planned action with streaming updates
+                yield f"⚡ **行动阶段**: 执行计划的行动...\n"
+                async for action_update in self._acting_phase_stream(reasoning_context, self.current_step):
+                    yield action_update
+                
+                # Get the action step result
+                action_step = await self._acting_phase(reasoning_context, self.current_step)
+                if action_step:
+                    steps.append(action_step)
+                    # Update context with action taken
+                    reasoning_context["steps_taken"].append({
+                        "action": action_step.action,
+                        "params": action_step.action_params,
+                        "tool_result": action_step.tool_result,
+                        "success": action_step.execution_success
+                    })
+                    
+                    # Add tool results to context
+                    if action_step.tool_result:
+                        reasoning_context["tool_results"].append({
+                            "step": self.current_step,
+                            "tool": action_step.action,
+                            "result": action_step.tool_result,
+                            "success": action_step.execution_success
+                        })
+                
+                # 3. OBSERVING - Analyze the results of the action
+                yield f"👁️ **观察阶段**: 分析行动结果...\n"
+                observation_step = await self._observing_phase(reasoning_context, self.current_step, action_step)
+                if observation_step:
+                    steps.append(observation_step)
+                    yield f"🔍 观察结果: {observation_step.observation[:200]}{'...' if len(observation_step.observation) > 200 else ''}\n"
+                    # Update context with observation
+                    reasoning_context["last_observation"] = observation_step.observation
+                
+                # 4. REFLECTING - Learn from the outcome and plan next step
+                yield f"🔮 **反思阶段**: 从结果中学习并规划下一步...\n"
+                reflection_step = await self._reflecting_phase(reasoning_context, self.current_step, observation_step)
+                if reflection_step:
+                    steps.append(reflection_step)
+                    yield f"💡 反思结果: {reflection_step.reflection[:200]}{'...' if len(reflection_step.reflection) > 200 else ''}\n"
+                    yield f"🎲 当前置信度: {reflection_step.confidence:.2f}\n"
+                    
+                    # Check if reflection indicates completion
+                    if reflection_step.confidence >= self.confidence_threshold:
+                        yield f"🎉 **目标达成**: 置信度 {reflection_step.confidence:.2f} 超过阈值 {self.confidence_threshold}\n"
+                        # Create completion step
+                        completion_step = ReasoningStep(
+                            step_id=self.current_step,
+                            state=ReasoningState.COMPLETED,
+                            thought="Goal achieved with sufficient confidence",
+                            confidence=reflection_step.confidence,
+                            duration=time.time() - step_start
+                        )
+                        steps.append(completion_step)
+                        break
+                
+                yield f"⏱️ 第 {self.current_step} 轮耗时: {time.time() - step_start:.2f}秒\n"
+            
+            # Determine final result
+            total_duration = time.time() - start_time
+            final_step = steps[-1] if steps else None
+            success = final_step and final_step.state == ReasoningState.COMPLETED
+            
+            # Extract final answer from the reasoning process
+            final_answer = await self._extract_final_answer(steps, reasoning_context)
+            
+            # Store result for later access
+            self._last_result = ReasoningResult(
+                goal=goal,
+                success=success,
+                steps=steps,
+                final_answer=final_answer,
+                total_duration=total_duration,
+                iterations=self.current_step,
+                confidence=final_step.confidence if final_step else 0.0
+            )
+            
+            yield f"\n🏁 **ReAct循环结束**\n"
+            yield f"   ✅ 成功: {success}\n"
+            yield f"   🔄 总迭代次数: {self.current_step}\n"
+            yield f"   ⏱️ 总耗时: {total_duration:.2f}秒\n"
+            if final_answer:
+                yield f"   💬 最终答案: {final_answer[:100]}{'...' if len(final_answer) > 100 else ''}\n"
+            
+        except Exception as e:
+            yield f"\n❌ **推理循环失败**: {str(e)}\n"
+            
+            # Create failure result
+            self._last_result = ReasoningResult(
+                goal=goal,
+                success=False,
+                steps=steps,
+                final_answer=f"推理失败: {str(e)}",
+                total_duration=time.time() - start_time,
+                iterations=self.current_step,
+                confidence=0.0
+            )
+
+    async def _acting_phase_stream(self, context: Dict[str, Any], step_id: int):
+        """
+        ACTING phase with streaming output - Execute the planned action with real-time updates
+        
+        Args:
+            context: Reasoning context
+            step_id: Current step ID
+            
+        Yields:
+            Real-time updates during action execution
+        """
+        try:
+            # Determine the action to take
+            action, action_params = self._select_action(context)
+            
+            if not action:
+                yield "⚠️ 无可执行的行动\n"
+                return
+            
+            # Stream action details
+            yield f"🎯 计划行动: {action}\n"
+            yield f"📋 行动参数: {self._format_params_for_display(action_params)}\n"
+            
+            step_start = time.time()
+            
+            # Execute actual MCP tool if tool executor is available
+            tool_result = None
+            execution_success = True
+            
+            if action in self.available_mcp_tools and self.tool_executor:
+                yield f"🔧 执行MCP工具: {action}\n"
+                yield f"🖥️  服务器: {self.available_mcp_tools[action]}\n"
+                
+                try:
+                    # Execute MCP tool with streaming feedback
+                    tool_result = await self.tool_executor(action, action_params)
+                    execution_time = time.time() - step_start
+                    
+                    yield f"✅ 工具执行成功!\n"
+                    yield f"📊 执行结果: {self._format_result_for_display(tool_result)}\n"
+                    yield f"⏱️  执行耗时: {execution_time:.2f}秒\n"
+                    
+                except Exception as e:
+                    execution_success = False
+                    yield f"❌ 工具执行失败: {e}\n"
+            else:
+                yield f"💭 执行推理行动: {action}\n"
+            
+            duration = time.time() - step_start
+            yield f"✅ 行动阶段完成 (耗时: {duration:.2f}秒)\n"
+            
+        except Exception as e:
+            yield f"❌ 行动阶段失败: {e}\n"
+
+    async def get_last_result(self) -> Optional[ReasoningResult]:
+        """
+        Get the result from the last streaming reasoning session
+        
+        Returns:
+            The last ReasoningResult, or None if no reasoning has been performed
+        """
+        return self._last_result 

@@ -192,6 +192,7 @@ Output your analysis in structured JSON format following the TaskPlan schema."""
             plan = self._parse_planning_result(result.final_output, user_input)
             
             logger.info(f"Created plan with {len(plan.steps)} steps, complexity: {plan.complexity.value}")
+            logger.info(f"plan: {plan}")
             return plan
             
         except Exception as e:
@@ -216,11 +217,13 @@ Output your analysis in structured JSON format following the TaskPlan schema."""
     
     def _create_planning_prompt(self, user_input: str) -> str:
         """Create detailed planning prompt for the agent"""
+        tools_info = self._format_tools_for_prompt()
+        
         return f"""Plan the execution of this user request:
 
 User Request: "{user_input}"
 
-Available Tools: {list(self.available_tools.keys())}
+Available Tools: {tools_info}
 
 Create a detailed execution plan considering:
 1. What is the user really asking for?
@@ -248,6 +251,22 @@ Provide your plan in JSON format with the following structure:
 
 Think step by step and be thorough."""
 
+    def _format_tools_for_prompt(self) -> str:
+        """Format available tools with descriptions for planning prompt"""
+        if not self.available_tools:
+            return "[]"
+        
+        tools_list = []
+        for tool_name, tool_info in self.available_tools.items():
+            if isinstance(tool_info, dict):
+                description = tool_info.get('description', f'{tool_name} tool')
+                tools_list.append(f"- {tool_name}: {description}")
+            else:
+                # Fallback for non-dict tool info
+                tools_list.append(f"- {tool_name}: {str(tool_info)}")
+        
+        return "\n".join(tools_list)
+    
     def _parse_planning_result(self, planning_output: str, user_input: str) -> TaskPlan:
         """Parse and validate planning agent output"""
         try:
