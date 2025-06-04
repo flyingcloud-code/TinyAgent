@@ -955,29 +955,21 @@ Be methodical, focused, and goal-oriented in your reasoning process."""
             yield f"✅ 已添加到对话记忆: 轮次 {conversation_turn}\n\n"
             
             # 2. Task Planning - Stream planning process
-            yield "📋 **任务规划阶段**\n"
-            yield "🎯 分析任务复杂度和所需步骤...\n"
-            
             planning_context = context or {}
             if enhanced_context:
                 planning_context["available_tools_context"] = enhanced_context
                 planning_context["tool_summary"] = self.get_tool_context_summary()
-                yield "📊 工具上下文已加入规划考虑\n"
             
-            task_plan = await self.task_planner.create_plan(
+            # Stream TaskPlanner process
+            task_plan = None
+            async for planning_update in self.task_planner.create_plan_stream(
                 task_description=message,
                 context=planning_context
-            )
+            ):
+                yield planning_update
             
-            yield f"✅ **任务规划完成**\n"
-            yield f"   📊 复杂度: {task_plan.complexity.value}\n"
-            yield f"   📝 步骤数: {len(task_plan.steps)}\n"
-            yield f"   ⏱️ 预计时长: {task_plan.total_estimated_duration}秒\n"
-            
-            # Show plan steps
-            for i, step in enumerate(task_plan.steps, 1):
-                yield f"   {i}. {step.description}\n"
-            yield "\n"
+            # Get the planning result
+            task_plan = await self.task_planner.get_last_plan()
             
             # Update conversation memory with task plan
             task_context = self.conversation_memory.create_task_context(
@@ -992,9 +984,6 @@ Be methodical, focused, and goal-oriented in your reasoning process."""
             )
             
             # 3. Tool Selection - Stream tool selection process
-            yield "🔧 **工具选择阶段**\n"
-            yield "🔍 分析可用工具并选择合适的工具...\n"
-            
             available_tools = await self._get_available_tools()
             
             # Enhance available tools with MCP context information
@@ -1009,18 +998,17 @@ Be methodical, focused, and goal-oriented in your reasoning process."""
                         "performance": mcp_tool.performance_metrics.__dict__ if mcp_tool.performance_metrics else {}
                     })
             
-            tool_selection = await self.tool_selector.select_tools_for_task(
+            # Stream ToolSelector process
+            tool_selection = None
+            async for selection_update in self.tool_selector.select_tools_for_task_stream(
                 task_description=message,
                 available_tools=available_tools,
                 task_context=task_context
-            )
+            ):
+                yield selection_update
             
-            yield f"✅ **工具选择完成**\n"
-            if tool_selection.selected_tools:
-                yield f"🔧 已选择工具: {', '.join(tool_selection.selected_tools)}\n"
-            else:
-                yield "ℹ️ 未选择特定工具，将使用通用推理\n"
-            yield "\n"
+            # Get the tool selection result
+            tool_selection = await self.tool_selector.get_last_selection()
             
             # 4. Reasoning and Acting - Stream ReAct loop with real-time updates
             yield "🧠 **推理与行动阶段 (ReAct循环)**\n"

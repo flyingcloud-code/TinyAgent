@@ -338,23 +338,267 @@ Output your analysis in structured format with tool names, confidence scores, an
             return self._create_fallback_selection(task_step_description)
     
     async def select_tools_for_task(self, 
-                                  task_description: str, 
-                                  available_tools: List[Dict[str, Any]], 
-                                  task_context: Optional[Any] = None) -> ToolSelection:
+                              task_description: str, 
+                              available_tools: List[Dict[str, Any]], 
+                              task_context: Optional[Any] = None) -> ToolSelection:
         """
-        Select tools for a task (alias for select_best_tool for compatibility)
+        Select appropriate tools for a given task
         
         Args:
             task_description: Description of the task
-            available_tools: List of available tools (for compatibility)
-            task_context: Optional task context (for compatibility)
+            available_tools: List of available tools
+            task_context: Optional task context information
             
         Returns:
-            ToolSelection with selected tools and reasoning
+            ToolSelection: Selected tools with confidence scores and reasoning
         """
-        # For now, ignore available_tools and task_context and delegate to select_best_tool
-        # TODO: Integrate available_tools and task_context into selection process
-        return await self.select_best_tool(task_description)
+        logger.info(f"Selecting tools for task: {task_description[:100]}...")
+        
+        # Use rule-based selection as primary method for now
+        selected_tools = self._rule_based_selection(task_description)
+        
+        # Calculate confidence scores
+        confidence_scores = {}
+        for tool in selected_tools:
+            confidence_scores[tool] = self._calculate_confidence(tool, task_description)
+        
+        # Create selection result
+        selection = ToolSelection(
+            selected_tools=selected_tools,
+            confidence_scores=confidence_scores,
+            reasoning=f"Selected based on keyword matching and task analysis",
+            alternative_tools=[],
+            estimated_execution_time=sum(
+                self.tool_metadata.get(tool, ToolMetadata(
+                    name=tool, description="", capabilities=[], 
+                    input_types=[], output_types=[], 
+                    complexity_score=5.0, reliability_score=0.8, 
+                    average_execution_time=5.0
+                )).average_execution_time for tool in selected_tools
+            ),
+            complexity_assessment="moderate"
+        )
+        
+        logger.info(f"Selected {len(selected_tools)} tools: {selected_tools}")
+        return selection
+
+    async def select_tools_for_task_stream(self, 
+                                     task_description: str, 
+                                     available_tools: List[Dict[str, Any]], 
+                                     task_context: Optional[Any] = None):
+        """
+        Select appropriate tools for a given task with streaming output for real-time feedback
+        
+        Args:
+            task_description: Description of the task
+            available_tools: List of available tools
+            task_context: Optional task context information
+            
+        Yields:
+            Real-time updates from the tool selection process
+        """
+        yield f"🔧 **ToolSelector 开始工具选择**\n"
+        yield f"🎯 任务描述: {task_description[:100]}{'...' if len(task_description) > 100 else ''}\n"
+        yield f"📊 可用工具总数: {len(available_tools)}\n"
+        
+        try:
+            # Step 1: Task Analysis
+            yield f"🔍 **步骤1**: 分析任务类型和需求...\n"
+            
+            task_lower = task_description.lower()
+            task_keywords = task_lower.split()
+            yield f"   🏷️  提取关键词: {len(task_keywords)} 个\n"
+            
+            # Step 2: Capability Matching
+            yield f"🎯 **步骤2**: 匹配工具能力...\n"
+            
+            # Analyze task type
+            task_type = self._analyze_task_type(task_description)
+            yield f"   📋 任务类型分析: {task_type}\n"
+            
+            # Step 3: Rule-based Selection
+            yield f"📏 **步骤3**: 规则驱动的工具选择...\n"
+            
+            selected_tools = self._rule_based_selection(task_description)
+            if selected_tools:
+                yield f"   ✅ 规则匹配成功，选择了 {len(selected_tools)} 个工具\n"
+                for tool in selected_tools:
+                    yield f"      • {tool}\n"
+            else:
+                yield f"   ⚠️  规则匹配未找到合适工具\n"
+            
+            # Step 4: Confidence Assessment
+            yield f"📊 **步骤4**: 计算工具置信度...\n"
+            
+            confidence_scores = {}
+            for tool in selected_tools:
+                confidence = self._calculate_confidence(tool, task_description)
+                confidence_scores[tool] = confidence
+                yield f"   🎲 {tool}: {confidence:.2f}\n"
+            
+            # Step 5: Alternative Tools Analysis
+            yield f"🔄 **步骤5**: 分析备选工具...\n"
+            
+            alternative_tools = []
+            for tool_name in self.tool_metadata.keys():
+                if tool_name not in selected_tools:
+                    if self.can_handle_task(tool_name, task_description):
+                        alternative_tools.append(tool_name)
+            
+            if alternative_tools:
+                yield f"   📋 发现 {len(alternative_tools)} 个备选工具: {', '.join(alternative_tools[:3])}\n"
+            else:
+                yield f"   ℹ️  未发现合适的备选工具\n"
+            
+            # Step 6: Performance Estimation
+            yield f"⏱️ **步骤6**: 估算执行时间...\n"
+            
+            total_time = 0
+            for tool in selected_tools:
+                tool_meta = self.tool_metadata.get(tool)
+                if tool_meta:
+                    tool_time = tool_meta.average_execution_time
+                    total_time += tool_time
+                    yield f"   ⏰ {tool}: {tool_time:.1f}秒\n"
+                else:
+                    # Default time for unknown tools
+                    default_time = 5.0
+                    total_time += default_time
+                    yield f"   ⏰ {tool}: {default_time:.1f}秒 (估算)\n"
+            
+            yield f"   📊 预计总执行时间: {total_time:.1f}秒\n"
+            
+            # Step 7: Complexity Assessment
+            yield f"📈 **步骤7**: 评估执行复杂度...\n"
+            
+            complexity = self._assess_complexity(selected_tools, task_description)
+            yield f"   📊 复杂度评估: {complexity}\n"
+            
+            # Final Results
+            yield f"\n🎉 **工具选择完成**\n"
+            yield f"   ✅ 最终选择: {len(selected_tools)} 个工具\n"
+            yield f"   🎲 平均置信度: {sum(confidence_scores.values()) / len(confidence_scores) if confidence_scores else 0:.2f}\n"
+            yield f"   ⏱️  预计执行时间: {total_time:.1f}秒\n"
+            yield f"   📋 备选方案: {len(alternative_tools)} 个\n"
+            
+            # Create and store selection result
+            selection = ToolSelection(
+                selected_tools=selected_tools,
+                confidence_scores=confidence_scores,
+                reasoning=f"基于任务类型'{task_type}'进行规则匹配和置信度分析",
+                alternative_tools=alternative_tools,
+                estimated_execution_time=total_time,
+                complexity_assessment=complexity
+            )
+            
+            self._last_selection = selection
+            yield f"\n"
+            
+        except Exception as e:
+            yield f"\n❌ **工具选择失败**: {str(e)}\n"
+            
+            # Create fallback selection
+            yield f"🔄 **创建备用选择**...\n"
+            selection = self._create_fallback_selection(task_description)
+            self._last_selection = selection
+            yield f"✅ 备用工具选择已创建\n"
+
+    def _analyze_task_type(self, task_description: str) -> str:
+        """
+        Analyze the type of task based on description
+        
+        Args:
+            task_description: Description of the task
+            
+        Returns:
+            String describing the task type
+        """
+        task_lower = task_description.lower()
+        
+        # Define task type patterns
+        task_patterns = {
+            "文件操作": ["read", "write", "file", "document", "save", "load"],
+            "网络搜索": ["search", "find", "google", "lookup", "query"],
+            "网页内容": ["website", "url", "webpage", "fetch", "content"],
+            "天气查询": ["weather", "temperature", "forecast", "climate"],
+            "数据分析": ["analyze", "data", "statistics", "chart", "graph"],
+            "推理思考": ["think", "reason", "analyze", "complex", "solve"],
+            "通用查询": ["what", "how", "when", "where", "why", "tell me"]
+        }
+        
+        # Count matches for each task type
+        type_scores = {}
+        for task_type, keywords in task_patterns.items():
+            score = sum(1 for keyword in keywords if keyword in task_lower)
+            if score > 0:
+                type_scores[task_type] = score
+        
+        # Return the highest scoring task type
+        if type_scores:
+            return max(type_scores.items(), key=lambda x: x[1])[0]
+        else:
+            return "未分类任务"
+
+    def _assess_complexity(self, selected_tools: List[str], task_description: str) -> str:
+        """
+        Assess the complexity of executing selected tools for the task
+        
+        Args:
+            selected_tools: List of selected tool names
+            task_description: Description of the task
+            
+        Returns:
+            String describing complexity level
+        """
+        # Base complexity on number of tools and task characteristics
+        tool_count = len(selected_tools)
+        task_length = len(task_description.split())
+        
+        # Calculate complexity score
+        complexity_score = 0
+        
+        # Tool count factor
+        if tool_count == 0:
+            complexity_score += 1
+        elif tool_count == 1:
+            complexity_score += 2
+        elif tool_count <= 3:
+            complexity_score += 3
+        else:
+            complexity_score += 4
+        
+        # Task description complexity
+        if task_length <= 5:
+            complexity_score += 1
+        elif task_length <= 15:
+            complexity_score += 2
+        else:
+            complexity_score += 3
+        
+        # Tool complexity factor
+        for tool in selected_tools:
+            tool_meta = self.tool_metadata.get(tool)
+            if tool_meta and tool_meta.complexity_score > 7:
+                complexity_score += 1
+        
+        # Determine complexity level
+        if complexity_score <= 3:
+            return "简单"
+        elif complexity_score <= 6:
+            return "中等"
+        elif complexity_score <= 8:
+            return "复杂"
+        else:
+            return "非常复杂"
+
+    async def get_last_selection(self) -> Optional[ToolSelection]:
+        """
+        Get the result from the last streaming tool selection session
+        
+        Returns:
+            The last ToolSelection, or None if no selection has been performed
+        """
+        return getattr(self, '_last_selection', None)
     
     def _rule_based_selection(self, task_description: str) -> List[str]:
         """Simple rule-based tool selection"""

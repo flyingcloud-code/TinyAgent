@@ -214,6 +214,170 @@ Output your analysis in structured JSON format following the TaskPlan schema."""
         # For now, ignore context and delegate to analyze_and_plan
         # TODO: Integrate context into planning process
         return await self.analyze_and_plan(task_description)
+
+    async def create_plan_stream(self, task_description: str, context: Optional[Dict[str, Any]] = None):
+        """
+        Create execution plan for a task with streaming output for real-time feedback
+        
+        Args:
+            task_description: Description of the task to plan
+            context: Optional context information
+            
+        Yields:
+            Real-time updates from the planning process
+        """
+        yield f"📋 **TaskPlanner 开始分析任务**\n"
+        yield f"🎯 任务描述: {task_description[:100]}{'...' if len(task_description) > 100 else ''}\n"
+        
+        try:
+            # Step 1: Task Analysis
+            yield f"🔍 **步骤1**: 分析任务复杂度和要求...\n"
+            
+            # Analyze task complexity
+            complexity = self._analyze_task_complexity(task_description)
+            yield f"   📊 复杂度评估: {complexity.value}\n"
+            
+            # Step 2: Tool Requirements Analysis
+            yield f"🔧 **步骤2**: 识别所需工具...\n"
+            required_tools = self.identify_required_tools(task_description)
+            if required_tools:
+                yield f"   🛠️  识别到所需工具: {', '.join(required_tools)}\n"
+            else:
+                yield f"   ℹ️  未识别到特定工具需求，将使用通用推理\n"
+            
+            # Step 3: Context Integration
+            yield f"📚 **步骤3**: 整合上下文信息...\n"
+            available_tools_count = len(self.available_tools) if self.available_tools else 0
+            yield f"   📊 可用工具数量: {available_tools_count}\n"
+            
+            if context and context.get("available_tools_context"):
+                yield f"   ✅ 已获取增强工具上下文\n"
+            else:
+                yield f"   ⚠️  未获取增强工具上下文\n"
+            
+            # Step 4: Step Decomposition
+            yield f"📝 **步骤4**: 分解任务步骤...\n"
+            steps = self.decompose_into_steps(task_description)
+            yield f"   🗂️  分解为 {len(steps)} 个执行步骤\n"
+            
+            # Step 5: LLM Planning (if available)
+            yield f"🧠 **步骤5**: 生成详细执行计划...\n"
+            
+            if self.planning_agent:
+                yield f"   🤖 使用专业规划代理生成计划...\n"
+                
+                # Prepare planning prompt
+                planning_prompt = self._create_planning_prompt(task_description)
+                
+                # Get plan from planning agent with streaming
+                result = await Runner.run(
+                    self.planning_agent,
+                    planning_prompt,
+                    max_turns=3
+                )
+                
+                yield f"   ✅ LLM规划完成\n"
+                
+                # Parse and validate plan
+                plan = self._parse_planning_result(result.final_output, task_description)
+                
+            else:
+                yield f"   🔄 使用规则驱动的规划方法...\n"
+                plan = self._create_fallback_plan(task_description)
+            
+            # Step 6: Plan Validation
+            yield f"✅ **步骤6**: 验证和优化计划...\n"
+            validation_issues = self.validate_plan(plan)
+            if validation_issues:
+                yield f"   ⚠️  发现 {len(validation_issues)} 个潜在问题\n"
+                for issue in validation_issues[:3]:  # Show first 3 issues
+                    yield f"   • {issue}\n"
+            else:
+                yield f"   ✅ 计划验证通过\n"
+            
+            # Final Summary
+            yield f"\n🎉 **任务规划完成**\n"
+            yield f"   📊 复杂度: {plan.complexity.value}\n"
+            yield f"   📝 总步骤数: {len(plan.steps)}\n"
+            yield f"   ⏱️  预计总时长: {plan.total_estimated_duration:.1f}秒\n"
+            yield f"   🎯 成功标准: {len(plan.success_criteria)}个\n"
+            
+            # Show step details
+            yield f"\n📋 **执行步骤详情**:\n"
+            for i, step in enumerate(plan.steps, 1):
+                yield f"   {i}. {step.description}\n"
+                if step.required_tools:
+                    yield f"      🔧 工具: {', '.join(step.required_tools)}\n"
+                yield f"      ⏱️  预计耗时: {step.estimated_duration:.1f}秒\n"
+                if step.dependencies:
+                    yield f"      🔗 依赖: 步骤 {', '.join(map(str, step.dependencies))}\n"
+            
+            yield f"\n"
+            
+            # Store the result for later access
+            self._last_plan = plan
+            
+        except Exception as e:
+            yield f"\n❌ **规划失败**: {str(e)}\n"
+            # Create fallback plan
+            yield f"🔄 **创建备用计划**...\n"
+            plan = self._create_fallback_plan(task_description)
+            self._last_plan = plan
+            yield f"✅ 备用计划已创建\n"
+
+    def _analyze_task_complexity(self, task_description: str) -> TaskComplexity:
+        """
+        Analyze task complexity based on description
+        
+        Args:
+            task_description: Description of the task
+            
+        Returns:
+            TaskComplexity: Assessed complexity level
+        """
+        task_lower = task_description.lower()
+        
+        # Complex indicators
+        complex_indicators = [
+            'analyze', 'compare', 'summarize', 'combine', 'integrate',
+            'multiple steps', 'complex', 'detailed analysis', 'comprehensive'
+        ]
+        
+        # Very complex indicators
+        very_complex_indicators = [
+            'workflow', 'pipeline', 'orchestrate', 'coordinate',
+            'multi-stage', 'iterative', 'recursive', 'dependent'
+        ]
+        
+        # Simple indicators
+        simple_indicators = [
+            'read', 'list', 'show', 'display', 'get', 'fetch',
+            'what is', 'tell me', 'find'
+        ]
+        
+        # Count indicators
+        very_complex_count = sum(1 for indicator in very_complex_indicators if indicator in task_lower)
+        complex_count = sum(1 for indicator in complex_indicators if indicator in task_lower)
+        simple_count = sum(1 for indicator in simple_indicators if indicator in task_lower)
+        
+        # Determine complexity
+        if very_complex_count > 0:
+            return TaskComplexity.VERY_COMPLEX
+        elif complex_count > 1:
+            return TaskComplexity.COMPLEX
+        elif complex_count > 0 or len(task_description.split()) > 20:
+            return TaskComplexity.MODERATE
+        else:
+            return TaskComplexity.SIMPLE
+
+    async def get_last_plan(self) -> Optional[TaskPlan]:
+        """
+        Get the result from the last streaming planning session
+        
+        Returns:
+            The last TaskPlan, or None if no planning has been performed
+        """
+        return getattr(self, '_last_plan', None)
     
     def _create_planning_prompt(self, user_input: str) -> str:
         """Create detailed planning prompt for the agent"""
@@ -517,31 +681,4 @@ Think step by step and be thorough."""
                 if dep_id not in step_ids:
                     issues.append(f"Step {step.step_id} depends on non-existent step {dep_id}")
         
-        return issues
-
-    async def update_plan_with_observation(self, 
-                                         plan: TaskPlan, 
-                                         completed_steps: List[int],
-                                         step_results: Dict[int, Any],
-                                         observation: str) -> TaskPlan:
-        """
-        Update plan based on execution results and observations
-        
-        Args:
-            plan: Current task plan
-            completed_steps: List of completed step IDs
-            step_results: Results from completed steps
-            observation: Observation about current state
-            
-        Returns:
-            Updated TaskPlan
-        """
-        try:
-            # For now, return the same plan
-            # TODO: Implement intelligent plan adaptation
-            logger.info(f"Plan update requested - completed: {len(completed_steps)} steps")
-            return plan
-            
-        except Exception as e:
-            logger.error(f"Plan update failed: {e}")
-            return plan 
+        return issues 
