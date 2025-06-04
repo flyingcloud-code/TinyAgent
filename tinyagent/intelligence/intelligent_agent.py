@@ -1045,18 +1045,26 @@ Be methodical, focused, and goal-oriented in your reasoning process."""
             # 5. Result Observation and Learning
             if self.config.enable_learning:
                 yield "📊 **结果观察与学习阶段**\n"
+                
+                # Prepare observation data for streaming
+                observation_data = []
                 for i, step in enumerate(reasoning_result.steps):
                     if step.action and step.observation:
-                        yield f"🔍 观察步骤 {i+1}: {step.action}\n"
-                        observation = await self.result_observer.observe_result(
-                            action_id=f"reasoning_step_{i}",
-                            result=step.observation,
-                            expected_outcome=step.thought,
-                            execution_time=step.duration,
-                            action_name=step.action
-                        )
-                        yield f"   📈 成功评估: {observation.success_assessment}\n"
-                        yield f"   🎲 置信度: {observation.confidence:.2f}\n"
+                        observation_data.append({
+                            'action_id': f"reasoning_step_{i}",
+                            'result': step.observation,
+                            'expected_outcome': step.thought,
+                            'execution_time': step.duration,
+                            'action_name': step.action
+                        })
+                
+                if observation_data:
+                    # Stream observation process for multiple results
+                    async for observation_update in self.result_observer.observe_multiple_results_stream(observation_data):
+                        yield observation_update
+                else:
+                    yield "ℹ️  无推理步骤需要观察分析\n"
+                
                 yield "\n"
             
             # 6. Update conversation memory with results

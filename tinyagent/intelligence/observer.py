@@ -549,4 +549,329 @@ Format as bullet points."""
             logger.info(f"Cleared {len(to_remove)} observations older than {older_than_hours} hours")
         else:
             self.observations.clear()
-            logger.info("Cleared all observations") 
+            logger.info("Cleared all observations")
+
+    async def observe_result_stream(self, action_id: str, result: Any, 
+                                  expected_outcome: Optional[str] = None,
+                                  execution_time: Optional[float] = None,
+                                  action_name: Optional[str] = None):
+        """
+        Observe and analyze action result with streaming output for real-time feedback
+        
+        Args:
+            action_id: ID of the action that was executed
+            result: Result from action execution
+            expected_outcome: Expected outcome description
+            execution_time: Time taken to execute the action
+            action_name: Name of the action for pattern analysis
+            
+        Yields:
+            Real-time updates from the observation and analysis process
+        """
+        yield f"👁️ **ResultObserver 开始观察分析**\n"
+        yield f"🆔 行动ID: {action_id}\n"
+        yield f"🎯 行动名称: {action_name or '未知'}\n"
+        yield f"⏱️  执行时间: {execution_time:.2f}秒" if execution_time else "⏱️  执行时间: 未知\n"
+        
+        try:
+            start_time = time.time()
+            observation_id = f"obs_{action_id}_{int(time.time() * 1000)}"
+            
+            # Step 1: Initial Result Assessment
+            yield f"\n📊 **步骤1**: 结果初步评估...\n"
+            yield f"   📈 结果类型: {type(result).__name__}\n"
+            yield f"   📏 结果大小: {len(str(result))} 字符\n"
+            
+            if expected_outcome:
+                yield f"   🎯 期望结果: {expected_outcome[:50]}{'...' if len(expected_outcome) > 50 else ''}\n"
+            else:
+                yield f"   ⚠️  无期望结果基准\n"
+            
+            # Step 2: Success Assessment
+            yield f"\n✅ **步骤2**: 成功评估分析...\n"
+            
+            success_assessment = self._assess_success(result, expected_outcome)
+            yield f"   🎲 成功评估: {'成功' if success_assessment else '失败'}\n"
+            
+            # Detail the assessment reasoning
+            if isinstance(result, dict):
+                if "success" in result:
+                    yield f"   📋 评估依据: 结果中包含 success 字段\n"
+                elif "status" in result:
+                    yield f"   📋 评估依据: 结果状态为 {result['status']}\n"
+                elif "error" in result:
+                    yield f"   📋 评估依据: 结果中{'包含' if result.get('error') else '不包含'}错误信息\n"
+                else:
+                    yield f"   📋 评估依据: 基于结果内容综合判断\n"
+            elif result is None:
+                yield f"   📋 评估依据: 结果为空\n"
+            else:
+                yield f"   📋 评估依据: 基于结果内容和类型判断\n"
+            
+            # Step 3: Confidence Calculation
+            yield f"\n🎲 **步骤3**: 置信度计算...\n"
+            
+            confidence = self._calculate_confidence(result, success_assessment, expected_outcome)
+            yield f"   📊 置信度分数: {confidence:.2f}\n"
+            
+            # Explain confidence factors
+            if expected_outcome:
+                yield f"   🎯 期望匹配度: 已提供基准\n"
+            else:
+                yield f"   ⚠️  期望匹配度: 无基准降低置信度\n"
+            
+            if isinstance(result, dict) and "confidence" in result:
+                yield f"   🔍 内置置信度: {result['confidence']}\n"
+            
+            # Step 4: Pattern Detection
+            yield f"\n🔍 **步骤4**: 模式检测分析...\n"
+            
+            patterns = self._detect_patterns(result, success_assessment, action_name, execution_time)
+            if patterns:
+                yield f"   📈 发现模式: {len(patterns)} 个\n"
+                for i, pattern in enumerate(patterns[:3], 1):  # Show first 3 patterns
+                    yield f"      {i}. {pattern}\n"
+            else:
+                yield f"   📉 未发现显著模式\n"
+            
+            # Step 5: Performance Metrics
+            yield f"\n📊 **步骤5**: 性能指标计算...\n"
+            
+            metrics = self._calculate_performance_metrics(result, execution_time, success_assessment)
+            for metric_name, metric_value in metrics.items():
+                yield f"   📈 {metric_name}: {metric_value:.2f}\n"
+            
+            # Step 6: Insight Generation
+            yield f"\n💡 **步骤6**: 深度洞察生成...\n"
+            
+            if self.llm_agent and self.observation_level in [ObservationLevel.DETAILED, ObservationLevel.COMPREHENSIVE]:
+                yield f"   🧠 使用LLM生成深度洞察...\n"
+                insights = await self._generate_insights(result, success_assessment, action_name, execution_time)
+            else:
+                yield f"   🔧 使用规则生成基础洞察...\n"
+                insights = await self._generate_insights(result, success_assessment, action_name, execution_time)
+            
+            if insights:
+                yield f"   ✨ 生成洞察: {len(insights)} 条\n"
+                for i, insight in enumerate(insights[:2], 1):  # Show first 2 insights
+                    yield f"      {i}. {insight[:80]}{'...' if len(insight) > 80 else ''}\n"
+            else:
+                yield f"   📝 未生成特殊洞察\n"
+            
+            # Step 7: Improvement Suggestions
+            yield f"\n🚀 **步骤7**: 改进建议生成...\n"
+            
+            improvements = await self._generate_improvements(result, success_assessment, action_id, action_name)
+            if improvements:
+                yield f"   💡 改进建议: {len(improvements)} 条\n"
+                for i, suggestion in enumerate(improvements[:2], 1):  # Show first 2 suggestions
+                    yield f"      {i}. {suggestion[:80]}{'...' if len(suggestion) > 80 else ''}\n"
+            else:
+                yield f"   ✅ 暂无特别改进建议\n"
+            
+            # Step 8: Create and Store Observation
+            yield f"\n💾 **步骤8**: 创建观察记录...\n"
+            
+            observation = Observation(
+                observation_id=observation_id,
+                action_id=action_id,
+                result=result,
+                success_assessment=success_assessment,
+                confidence=confidence,
+                insights=insights,
+                improvement_suggestions=improvements,
+                patterns_detected=patterns,
+                performance_metrics=metrics,
+                observation_level=self.observation_level
+            )
+            
+            # Store observation
+            self.observations[observation_id] = observation
+            yield f"   📝 观察记录已保存 (ID: {observation_id})\n"
+            
+            # Step 9: Update Learning State
+            yield f"\n🧠 **步骤9**: 更新学习状态...\n"
+            
+            await self._update_learning_state(observation, action_name, execution_time)
+            yield f"   📚 学习状态已更新\n"
+            
+            # Update counters
+            if success_assessment:
+                self.success_count += 1
+                yield f"   ✅ 成功计数: {self.success_count}\n"
+            else:
+                self.failure_count += 1
+                yield f"   ❌ 失败计数: {self.failure_count}\n"
+            
+            observation_duration = time.time() - start_time
+            self.total_observation_time += observation_duration
+            
+            # Final Summary
+            yield f"\n🎉 **观察分析完成**\n"
+            yield f"   📊 成功评估: {'成功' if success_assessment else '失败'}\n"
+            yield f"   🎲 置信度: {confidence:.2f}\n"
+            yield f"   💡 洞察数: {len(insights)}\n"
+            yield f"   🚀 建议数: {len(improvements)}\n"
+            yield f"   📈 模式数: {len(patterns)}\n"
+            yield f"   ⏱️  观察耗时: {observation_duration:.2f}秒\n"
+            
+            # Store the result for later access
+            self._last_observation = observation
+            yield f"\n"
+            
+        except Exception as e:
+            yield f"\n❌ **观察分析异常**: {str(e)}\n"
+            
+            # Create minimal observation for error case
+            error_observation = Observation(
+                observation_id=f"error_obs_{action_id}_{int(time.time() * 1000)}",
+                action_id=action_id,
+                result=result,
+                success_assessment=False,
+                confidence=0.0,
+                insights=[f"观察分析过程中发生错误: {str(e)}"],
+                improvement_suggestions=["检查观察分析配置"],
+                observation_level=self.observation_level
+            )
+            
+            self.observations[error_observation.observation_id] = error_observation
+            self._last_observation = error_observation
+
+    async def observe_multiple_results_stream(self, results_data: List[Dict[str, Any]]):
+        """
+        Observe and analyze multiple action results with streaming output
+        
+        Args:
+            results_data: List of result data dictionaries containing action_id, result, etc.
+            
+        Yields:
+            Real-time updates from the batch observation process
+        """
+        yield f"👁️ **ResultObserver 开始批量观察**\n"
+        yield f"📊 结果总数: {len(results_data)}\n"
+        yield f"🎛️  观察级别: {self.observation_level.value}\n"
+        
+        try:
+            start_time = time.time()
+            observations = []
+            
+            # Step 1: Process each result
+            yield f"\n📋 **步骤1**: 逐一分析结果...\n"
+            
+            for i, result_data in enumerate(results_data, 1):
+                action_id = result_data.get('action_id', f'unknown_{i}')
+                result = result_data.get('result')
+                action_name = result_data.get('action_name')
+                execution_time = result_data.get('execution_time')
+                expected_outcome = result_data.get('expected_outcome')
+                
+                yield f"   📝 正在分析 {i}/{len(results_data)}: {action_name or action_id}\n"
+                
+                # Create observation (non-streaming)
+                observation = await self.observe_result(
+                    action_id=action_id,
+                    result=result,
+                    expected_outcome=expected_outcome,
+                    execution_time=execution_time,
+                    action_name=action_name
+                )
+                
+                observations.append(observation)
+                success_status = "✅" if observation.success_assessment else "❌"
+                yield f"      {success_status} 置信度: {observation.confidence:.2f}\n"
+            
+            # Step 2: Aggregate Analysis
+            yield f"\n📊 **步骤2**: 聚合分析...\n"
+            
+            total_observations = len(observations)
+            successful_observations = sum(1 for obs in observations if obs.success_assessment)
+            average_confidence = sum(obs.confidence for obs in observations) / total_observations if total_observations > 0 else 0.0
+            
+            yield f"   📈 总观察数: {total_observations}\n"
+            yield f"   ✅ 成功数: {successful_observations}\n"
+            yield f"   ❌ 失败数: {total_observations - successful_observations}\n"
+            yield f"   🎲 平均置信度: {average_confidence:.2f}\n"
+            yield f"   📊 成功率: {(successful_observations / total_observations * 100) if total_observations > 0 else 0:.1f}%\n"
+            
+            # Step 3: Pattern Analysis Across Results
+            yield f"\n🔍 **步骤3**: 跨结果模式分析...\n"
+            
+            all_patterns = []
+            for obs in observations:
+                all_patterns.extend(obs.patterns_detected)
+            
+            # Count pattern frequency
+            pattern_counts = {}
+            for pattern in all_patterns:
+                pattern_counts[pattern] = pattern_counts.get(pattern, 0) + 1
+            
+            if pattern_counts:
+                common_patterns = sorted(pattern_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+                yield f"   📈 发现 {len(pattern_counts)} 种模式\n"
+                for pattern, count in common_patterns:
+                    yield f"      • {pattern} (出现 {count} 次)\n"
+            else:
+                yield f"   📉 未发现显著跨结果模式\n"
+            
+            # Step 4: Collective Insights
+            yield f"\n💡 **步骤4**: 集体洞察生成...\n"
+            
+            all_insights = []
+            for obs in observations:
+                all_insights.extend(obs.insights)
+            
+            unique_insights = list(set(all_insights))  # Remove duplicates
+            yield f"   ✨ 独特洞察: {len(unique_insights)} 条\n"
+            
+            # Step 5: Performance Trends
+            yield f"\n📊 **步骤5**: 性能趋势分析...\n"
+            
+            execution_times = [result_data.get('execution_time', 0) for result_data in results_data if result_data.get('execution_time')]
+            if execution_times:
+                avg_time = sum(execution_times) / len(execution_times)
+                min_time = min(execution_times)
+                max_time = max(execution_times)
+                
+                yield f"   ⏱️  平均执行时间: {avg_time:.2f}秒\n"
+                yield f"   🏃 最快执行: {min_time:.2f}秒\n"
+                yield f"   🐌 最慢执行: {max_time:.2f}秒\n"
+                yield f"   📈 时间标准差: {((sum((t - avg_time) ** 2 for t in execution_times) / len(execution_times)) ** 0.5):.2f}秒\n"
+            else:
+                yield f"   ⚠️  无执行时间数据\n"
+            
+            total_time = time.time() - start_time
+            
+            # Final Summary
+            yield f"\n🎉 **批量观察分析完成**\n"
+            yield f"   📊 处理结果: {total_observations} 个\n"
+            yield f"   📈 总体成功率: {(successful_observations / total_observations * 100) if total_observations > 0 else 0:.1f}%\n"
+            yield f"   🎲 平均置信度: {average_confidence:.2f}\n"
+            yield f"   💡 总洞察数: {len(unique_insights)}\n"
+            yield f"   📈 发现模式: {len(pattern_counts)}\n"
+            yield f"   ⏱️  总观察时间: {total_time:.2f}秒\n"
+            
+            # Store the batch results for later access
+            self._last_batch_observations = observations
+            yield f"\n"
+            
+        except Exception as e:
+            yield f"\n❌ **批量观察异常**: {str(e)}\n"
+            self._last_batch_observations = []
+
+    async def get_last_observation(self) -> Optional[Observation]:
+        """
+        Get the result from the last streaming observation
+        
+        Returns:
+            The last Observation, or None if no observation has been performed
+        """
+        return getattr(self, '_last_observation', None)
+
+    async def get_last_batch_observations(self) -> List[Observation]:
+        """
+        Get the results from the last streaming batch observation
+        
+        Returns:
+            List of Observations from the last batch observation
+        """
+        return getattr(self, '_last_batch_observations', []) 
