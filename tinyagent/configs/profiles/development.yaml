@@ -37,7 +37,7 @@ logging:
   format: "user_friendly"    # Clean console format
   file: "logs/development.log"
   structured_file: "logs/metrics/dev-metrics.jsonl"  # JSON metrics
-  max_file_size: "10MB"
+  max_file_size: "5MB"
   backup_count: 5
   enable_colors: true
   show_timestamps: false     # No timestamps in console for cleaner UX

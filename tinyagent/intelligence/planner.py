@@ -118,6 +118,7 @@ class TaskPlanner:
         
     def _create_default_planning_agent(self) -> Agent:
         """Create default planning agent if none provided"""
+        logger.info(f"TaskPlanner:_create_default_planning_agent")
         return Agent(
             name="TaskPlanningAgent",
             instructions=self._get_planning_instructions(),

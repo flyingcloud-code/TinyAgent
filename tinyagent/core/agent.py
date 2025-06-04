@@ -467,6 +467,7 @@ class TinyAgent:
             raise ValueError(f"API key not found in environment variable: {api_key_env}")
         
         # Load instructions
+        # TODO by code review: how the agent load proper prompt instructions, need check!!
         self.instructions = self._load_instructions(instructions)
         
         # Set up model
@@ -668,7 +669,7 @@ class TinyAgent:
             agent = Agent(**agent_kwargs)
             
             model_type = "LiteLLM" if self._should_use_litellm(self.model_name) else "OpenAI"
-            self.logger.info(f"Created agent '{self.config.agent.name}' with {model_type} model '{self.model_name}' (MCP servers will be added dynamically)")
+            log_agent(f"Created agent '{self.config.agent.name}' with {model_type} model '{self.model_name}' (MCP servers will be added dynamically)")
             return agent
             
         except Exception as e:
@@ -735,12 +736,13 @@ class TinyAgent:
             if not self._should_use_litellm(self.model_name):
                 from agents import ModelSettings
                 mcp_agent.model_settings = ModelSettings(temperature=self.config.llm.temperature)
-            
+            log_agent(f"get_agent: return mcp agent '{self.config.agent.name}' with model '{self.model_name}'")
             return mcp_agent
         
         # Otherwise, return simple agent (or create if needed)
         if self._agent is None:
             self._agent = self._create_agent()
+        log_agent(f"get_agent: return agent '{self.config.agent.name}' with model '{self.model_name}'")
         return self._agent
     
     async def get_agent_with_mcp(self) -> Agent:
@@ -764,7 +766,7 @@ class TinyAgent:
             model=self._create_model_instance(self.model_name),
             mcp_servers=connected_servers
         )
-        
+        log_agent(f"get_agent_with_mcp: '{self.config.agent.name}' with model '{self.model_name}'")
         return mcp_agent
     
     async def run(self, message: str, **kwargs) -> Any:
@@ -1610,7 +1612,7 @@ class TinyAgent:
                 from agents import ModelSettings
                 simple_agent.model_settings = ModelSettings(temperature=self.config.llm.temperature)
             
-            log_technical("info", f"Created simple agent for reasoning: {simple_agent.name}")
+            log_agent(f"Created simple agent for reasoning: {simple_agent.name}, model: {self.model_name}")
             return simple_agent
             
         except Exception as e:
