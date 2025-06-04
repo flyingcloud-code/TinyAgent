@@ -178,6 +178,8 @@ Output your analysis in structured JSON format following the TaskPlan schema."""
             
             # Prepare planning prompt
             planning_prompt = self._create_planning_prompt(user_input)
+
+            logger.info(f"planning_prompt: {planning_prompt}")
             
             # Get plan from planning agent
             result = await Runner.run(

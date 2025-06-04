@@ -469,7 +469,7 @@ class TinyAgent:
         # Load instructions
         # TODO by code review: how the agent load proper prompt instructions, need check!!
         self.instructions = self._load_instructions(instructions)
-        
+        log_agent(f"instructions loaded: {self.instructions}")
         # Set up model
         self.model_name = model_name or config.llm.model
         

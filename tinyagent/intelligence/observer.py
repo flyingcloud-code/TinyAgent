@@ -88,14 +88,16 @@ class ResultObserver:
     - Continuous improvement suggestions based on historical data
     """
     
-    def __init__(self, observation_level: ObservationLevel = ObservationLevel.DETAILED):
+    def __init__(self, observation_level: ObservationLevel = ObservationLevel.DETAILED, llm_agent=None):
         """
         Initialize ResultObserver
         
         Args:
             observation_level: Level of detail for observations
+            llm_agent: LLM agent for enhanced insight generation (required)
         """
         self.observation_level = observation_level
+        self.llm_agent = llm_agent
         self.observations: Dict[str, Observation] = {}
         self.learning_insights: Dict[str, LearningInsight] = {}
         self.performance_patterns: Dict[str, PerformancePattern] = {}
@@ -110,7 +112,7 @@ class ResultObserver:
         self.action_outcomes: Dict[str, List[bool]] = {}  # action_name -> [success, success, fail, ...]
         self.execution_times: Dict[str, List[float]] = {}  # action_name -> [time1, time2, ...]
         
-        logger.info(f"ResultObserver initialized with observation_level={observation_level.value}")
+        logger.info(f"ResultObserver initialized with observation_level={observation_level.value}, llm_enabled={llm_agent is not None}")
     
     async def observe_result(self, action_id: str, result: Any, 
                            expected_outcome: Optional[str] = None,
@@ -264,51 +266,49 @@ class ResultObserver:
     
     async def _generate_insights(self, result: Any, success: bool, action_name: Optional[str] = None, 
                                 execution_time: Optional[float] = None) -> List[str]:
-        """Generate insights from the result"""
-        insights = []
-        
-        # Success/failure insights
-        if success:
-            insights.append("Action completed successfully")
-            if execution_time and execution_time < 1.0:
-                insights.append("Fast execution time indicates efficient processing")
-        else:
-            insights.append("Action did not complete successfully")
-            if execution_time and execution_time > 10.0:
-                insights.append("Long execution time may indicate performance issues")
-        
-        # Result content insights
-        if isinstance(result, dict):
-            if "confidence" in result:
-                conf = float(result["confidence"])
-                if conf > 0.8:
-                    insights.append("High confidence result indicates reliable output")
-                elif conf < 0.5:
-                    insights.append("Low confidence result may need validation")
+        """Generate insights from the result using LLM"""
+        if not self.llm_agent:
+            raise ValueError("LLM agent is required for insight generation but not provided")
             
-            if "sources" in result:
-                sources = result["sources"]
-                if isinstance(sources, list) and len(sources) > 3:
-                    insights.append("Multiple sources provide good validation")
-        
-        # Pattern-based insights
-        if action_name and action_name in self.action_outcomes:
-            outcomes = self.action_outcomes[action_name]
-            if len(outcomes) >= 3:
-                recent_success_rate = sum(outcomes[-3:]) / 3
-                if recent_success_rate == 1.0:
-                    insights.append(f"Action '{action_name}' shows consistent success pattern")
-                elif recent_success_rate < 0.5:
-                    insights.append(f"Action '{action_name}' shows recurring issues")
-        
-        # Performance insights
-        if execution_time:
-            if execution_time < 0.5:
-                insights.append("Exceptionally fast execution")
-            elif execution_time > 30.0:
-                insights.append("Execution time suggests complex processing or potential bottleneck")
-        
-        return insights
+        try:
+            from agents import Runner
+            result_summary = str(result)[:500]  # Limit result size
+            prompt = f"""Analyze this action execution result and provide 3-5 key insights:
+            
+Action Name: {action_name or 'Unknown'}
+Success: {success}
+Execution Time: {execution_time:.2f}s if provided else 'N/A'
+Result: {result_summary}
+
+Provide insights about:
+1. Success/failure factors
+2. Performance characteristics  
+3. Result quality indicators
+4. Patterns or trends
+5. Areas for improvement
+
+Format as bullet points."""
+            
+            llm_result = await Runner.run(self.llm_agent, prompt)
+            llm_insights = llm_result.final_output.strip()
+            
+            # Parse LLM insights into list
+            insights = []
+            if llm_insights:
+                for line in llm_insights.split('\n'):
+                    line = line.strip()
+                    if line and (line.startswith('•') or line.startswith('-') or line.startswith('*')):
+                        insights.append(line.lstrip('•-* '))
+            
+            # Ensure we have at least some insights
+            if not insights:
+                insights = ["LLM analysis completed", "Result processed successfully"]
+                
+            return insights
+            
+        except Exception as e:
+            logger.error(f"LLM insight generation failed: {e}")
+            raise
     
     async def _generate_improvements(self, result: Any, success: bool, action_id: str, 
                                    action_name: Optional[str] = None) -> List[str]:

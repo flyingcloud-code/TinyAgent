@@ -63,16 +63,18 @@ class ActionExecutor:
     - Tool orchestration and coordination
     """
     
-    def __init__(self, max_concurrent_actions: int = 5, default_timeout: float = 60.0):
+    def __init__(self, max_concurrent_actions: int = 5, default_timeout: float = 60.0, llm_agent=None):
         """
         Initialize ActionExecutor
         
         Args:
             max_concurrent_actions: Maximum number of concurrent actions
             default_timeout: Default timeout for actions in seconds
+            llm_agent: LLM agent for intelligent built-in actions (required)
         """
         self.max_concurrent_actions = max_concurrent_actions
         self.default_timeout = default_timeout
+        self.llm_agent = llm_agent
         self.active_actions: Dict[str, ActionRequest] = {}
         self.completed_actions: Dict[str, ActionResult] = {}
         self.tool_registry: Dict[str, Callable] = {}
@@ -85,7 +87,7 @@ class ActionExecutor:
         self.failed_actions = 0
         self.total_execution_time = 0.0
         
-        logger.info(f"ActionExecutor initialized with max_concurrent={max_concurrent_actions}")
+        logger.info(f"ActionExecutor initialized with max_concurrent={max_concurrent_actions}, llm_enabled={llm_agent is not None}")
     
     def register_tool(self, name: str, tool_function: Callable):
         """
@@ -298,45 +300,95 @@ class ActionExecutor:
         }
     
     async def _builtin_analyze(self, data: str, focus: str) -> Dict[str, Any]:
-        """Built-in analysis action simulation"""
-        await asyncio.sleep(1.0)  # Simulate analysis time
-        return {
-            "data": data[:100] + "..." if len(data) > 100 else data,
-            "focus": focus,
-            "insights": f"Analysis focused on {focus} reveals key patterns",
-            "confidence": 0.75
-        }
+        """Built-in analysis action using LLM"""
+        if not self.llm_agent:
+            raise ValueError("LLM agent is required for analyze action but not provided")
+            
+        try:
+            from agents import Runner
+            prompt = f"Analyze the following data with focus on '{focus}': {data[:1000]}"
+            result = await Runner.run(self.llm_agent, prompt)
+            
+            return {
+                "data": data[:100] + "..." if len(data) > 100 else data,
+                "focus": focus,
+                "insights": result.final_output,
+                "confidence": 0.85,
+                "method": "llm_analysis"
+            }
+        except Exception as e:
+            logger.error(f"LLM analysis failed: {e}")
+            raise
     
     async def _builtin_create(self, content_type: str, specification: str) -> Dict[str, Any]:
-        """Built-in content creation action simulation"""
-        await asyncio.sleep(1.5)  # Simulate creation time
-        return {
-            "type": content_type,
-            "specification": specification,
-            "content": f"Created {content_type} based on {specification}",
-            "confidence": 0.80
-        }
+        """Built-in content creation action using LLM"""
+        if not self.llm_agent:
+            raise ValueError("LLM agent is required for create action but not provided")
+            
+        try:
+            from agents import Runner
+            prompt = f"Create {content_type} content based on this specification: {specification}"
+            result = await Runner.run(self.llm_agent, prompt)
+            
+            return {
+                "type": content_type,
+                "specification": specification,
+                "content": result.final_output,
+                "confidence": 0.90,
+                "method": "llm_creation"
+            }
+        except Exception as e:
+            logger.error(f"LLM content creation failed: {e}")
+            raise
     
     async def _builtin_synthesize(self, inputs: List[Any], format_type: str) -> Dict[str, Any]:
-        """Built-in synthesis action simulation"""
-        await asyncio.sleep(1.2)  # Simulate synthesis time
-        return {
-            "inputs_count": len(inputs),
-            "format": format_type,
-            "synthesis": f"Synthesized {len(inputs)} inputs into {format_type} format",
-            "confidence": 0.90
-        }
+        """Built-in synthesis action using LLM"""
+        if not self.llm_agent:
+            raise ValueError("LLM agent is required for synthesize action but not provided")
+            
+        try:
+            from agents import Runner
+            inputs_text = str(inputs)[:2000]  # Limit input size
+            prompt = f"Synthesize these inputs into {format_type} format: {inputs_text}"
+            result = await Runner.run(self.llm_agent, prompt)
+            
+            return {
+                "inputs_count": len(inputs),
+                "format": format_type,
+                "synthesis": result.final_output,
+                "confidence": 0.95,
+                "method": "llm_synthesis"
+            }
+        except Exception as e:
+            logger.error(f"LLM synthesis failed: {e}")
+            raise
     
     async def _builtin_validate(self, answer: str, criteria: List[str]) -> Dict[str, Any]:
-        """Built-in validation action simulation"""
-        await asyncio.sleep(0.8)  # Simulate validation time
-        return {
-            "answer": answer[:100] + "..." if len(answer) > 100 else answer,
-            "criteria": criteria,
-            "validation_result": "Answer meets validation criteria",
-            "passed": True,
-            "confidence": 0.95
-        }
+        """Built-in validation action using LLM"""
+        if not self.llm_agent:
+            raise ValueError("LLM agent is required for validate action but not provided")
+            
+        try:
+            from agents import Runner
+            criteria_text = ", ".join(criteria)
+            prompt = f"Validate this answer against these criteria: {criteria_text}. Answer: {answer[:500]}. Respond with 'VALID' or 'INVALID' followed by your reasoning."
+            result = await Runner.run(self.llm_agent, prompt)
+            
+            # Parse LLM result for validation decision
+            response_text = result.final_output.upper()
+            passed = "VALID" in response_text and "INVALID" not in response_text
+            
+            return {
+                "answer": answer[:100] + "..." if len(answer) > 100 else answer,
+                "criteria": criteria,
+                "validation_result": result.final_output,
+                "passed": passed,
+                "confidence": 0.95,
+                "method": "llm_validation"
+            }
+        except Exception as e:
+            logger.error(f"LLM validation failed: {e}")
+            raise
     
     def _validate_result(self, result: Any, request: ActionRequest) -> bool:
         """Validate action result"""

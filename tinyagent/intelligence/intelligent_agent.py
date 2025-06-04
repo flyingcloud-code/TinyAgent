@@ -60,36 +60,57 @@ class IntelligentAgent:
     
     def __init__(self, llm_agent=None, config: Optional[IntelligentAgentConfig] = None, tinyagent_config=None):
         """
-        Initialize IntelligentAgent with all intelligence components
+        Initialize IntelligentAgent with all sub-components
         
         Args:
-            llm_agent: Base LLM agent for reasoning
-            config: Configuration for intelligent behavior
+            llm_agent: Base LLM agent for general reasoning
+            config: Configuration for IntelligentAgent
             tinyagent_config: TinyAgent configuration for LLM settings
         """
         self.config = config or IntelligentAgentConfig()
         self.llm_agent = llm_agent
-        self.tinyagent_config = tinyagent_config  # Store TinyAgent config for ToolSelector
+        self.tinyagent_config = tinyagent_config
         
         # Initialize MCP context builder if available
-        self.mcp_context_builder = None
-        self.tool_cache = None
-        if MCP_CONTEXT_AVAILABLE:
-            try:
-                self.tool_cache = MCPToolCache()
+        try:
+            from ..mcp.context_builder import AgentContextBuilder
+            from ..mcp.cache import MCPToolCache
+            if llm_agent:
+                # Create tool cache
+                self.tool_cache = MCPToolCache(
+                    cache_duration=300,  # 5 minutes
+                    max_cache_size=100,
+                    persist_cache=True
+                )
                 self.mcp_context_builder = AgentContextBuilder(self.tool_cache)
                 logger.info("MCP context builder initialized")
-            except Exception as e:
-                logger.warning(f"Failed to initialize MCP context builder: {e}")
-                self.mcp_context_builder = None
-                self.tool_cache = None
-        else:
-            logger.warning("MCP context components not available")
+            else:
+                logger.warning("MCP context components not available")
+        except Exception as e:
+            logger.warning(f"Failed to initialize MCP context builder: {e}")
+            self.mcp_context_builder = None
+            self.tool_cache = None
         
-        # Initialize intelligence components
+        # 🔧 CRITICAL FIX: Create specialized agents for each component instead of sharing base_agent
+        
+        # Create specialized planning agent with planning instructions
+        planning_agent = self._create_specialized_agent(
+            name="TaskPlanner",
+            instructions=self._get_planning_instructions(),
+            llm_agent=llm_agent
+        )
+        
+        # Create specialized reasoning agent with reasoning instructions  
+        reasoning_agent = self._create_specialized_agent(
+            name="ReasoningEngine", 
+            instructions=self._get_reasoning_instructions(),
+            llm_agent=llm_agent
+        )
+        
+        # Initialize intelligence components with specialized agents
         self.task_planner = TaskPlanner(
             available_tools={},  # Will be populated when MCP tools are registered
-            planning_agent=llm_agent,  # Use llm_agent as planning_agent
+            planning_agent=planning_agent,  # 🔧 FIX: Use specialized planning agent
             max_steps=self.config.max_reasoning_iterations
         )
         
@@ -103,26 +124,28 @@ class IntelligentAgent:
         )
         
         self.reasoning_engine = ReasoningEngine(
-            llm_agent=llm_agent,
+            llm_agent=reasoning_agent,  # 🔧 FIX: Use specialized reasoning agent
             max_iterations=self.config.max_reasoning_iterations,
             confidence_threshold=self.config.confidence_threshold
         )
         
         self.action_executor = ActionExecutor(
             max_concurrent_actions=self.config.max_concurrent_actions,
-            default_timeout=self.config.action_timeout
+            default_timeout=self.config.action_timeout,
+            llm_agent=llm_agent  # 🔧 NEW: Add LLM support for built-in actions
         )
         
         observation_level = ObservationLevel.DETAILED if self.config.use_detailed_observation else ObservationLevel.BASIC
         self.result_observer = ResultObserver(
-            observation_level=observation_level
+            observation_level=observation_level,
+            llm_agent=llm_agent  # 🔧 NEW: Add LLM support for enhanced insights
         )
         
         # Track execution state
         self.current_task = None
         self.execution_history = []
         
-        logger.info(f"IntelligentAgent initialized with config: {self.config}")
+        logger.info(f"IntelligentAgent initialized with specialized agents and config: {self.config}")
         
         # Store MCP tools when registered
         self._mcp_tools = []
@@ -134,6 +157,91 @@ class IntelligentAgent:
         # 🔧 NEW: Tool execution capabilities
         self._mcp_tool_executor = None  # Will be set when MCP tools are registered
         self._available_mcp_tools = {}  # Maps tool_name -> server_name
+    
+    def _create_specialized_agent(self, name: str, instructions: str, llm_agent) -> Any:
+        """
+        Create a specialized agent with specific instructions
+        
+        Args:
+            name: Name of the specialized agent
+            instructions: Specialized instructions for this agent
+            llm_agent: Base LLM agent to derive model settings from
+            
+        Returns:
+            Specialized Agent instance
+        """
+        try:
+            from agents import Agent
+            
+            # Extract model and settings from base agent
+            model_instance = llm_agent.model if hasattr(llm_agent, 'model') else None
+            
+            specialized_agent = Agent(
+                name=f"TinyAgent-{name}",
+                instructions=instructions,
+                model=model_instance
+            )
+            
+            logger.info(f"Created specialized agent: {name} with dedicated instructions")
+            return specialized_agent
+            
+        except Exception as e:
+            logger.warning(f"Failed to create specialized agent {name}: {e}, using base agent")
+            return llm_agent
+    
+    def _get_planning_instructions(self) -> str:
+        """Get specialized instructions for task planning"""
+        return """You are an expert task planning agent. Your job is to analyze user requests and create detailed execution plans.
+
+Your responsibilities:
+1. Break down user requests into logical, executable steps
+2. Identify required tools for each step  
+3. Determine dependencies between steps
+4. Estimate realistic execution times
+5. Define clear success criteria
+6. Consider error recovery scenarios
+
+Output Format:
+Always provide your analysis in structured JSON format following the TaskPlan schema:
+- complexity: (simple/moderate/complex/very_complex)
+- steps: Array of step objects with id, description, tools, dependencies, duration, priority
+- success_criteria: Array of measurable success criteria
+
+Guidelines:
+- Maximum 10 steps per plan
+- Each step should be atomic and executable
+- Tool dependencies must be accurate
+- Time estimates should be realistic
+- Include validation steps where appropriate
+
+Think systematically and be thorough in your planning."""
+
+    def _get_reasoning_instructions(self) -> str:
+        """Get specialized instructions for reasoning engine"""
+        return """You are an expert reasoning agent implementing the ReAct (Reasoning + Acting) methodology.
+
+Your core process:
+1. THINK: Analyze the situation, understand the goal, and plan your approach
+2. ACT: Select and execute the most appropriate tool or action
+3. OBSERVE: Analyze the results of your action
+4. REFLECT: Learn from the outcome and decide next steps
+
+Reasoning Guidelines:
+- Always start by clearly understanding the user's goal
+- Think step-by-step and be explicit about your reasoning
+- Choose tools based on their specific capabilities and the current need
+- Observe results carefully and adjust your approach if needed
+- Reflect on whether you're making progress toward the goal
+- Stop when the goal is achieved or cannot be achieved
+
+Output Format:
+Structure your reasoning clearly:
+- Thought: Your analysis and reasoning
+- Action: The specific action/tool you're choosing  
+- Observation: What the results tell you
+- Reflection: What you learned and what to do next
+
+Be methodical, focused, and goal-oriented in your reasoning process."""
     
     def _detect_tool_query(self, message: str) -> bool:
         """
