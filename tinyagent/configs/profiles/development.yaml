@@ -1,47 +1,35 @@
-# Development Profile Configuration
-# 开发环境配置 - 只引用资源，不重复定义
+# TinyAgent 开发环境配置 (简化版)
+# 可选配置文件 - 大部分用户不需要修改此文件
+# 智能默认值已覆盖90%的使用场景
 
 agent:
   name: "TinyAgent-Dev"
-  instructions_file: "prompts/default_instructions.txt"
   max_iterations: 5
-  use_streaming: true  # 是否使用流式API进行工具调用日志记录
-  intelligent_mode: true  # Enable intelligent ReAct mode
-  
-  # Intelligence configuration
-  max_reasoning_iterations: 10
-  confidence_threshold: 0.8
-  max_concurrent_actions: 5
-  action_timeout: 60.0
-  memory_max_context_turns: 20
-  use_detailed_observation: true
-  enable_learning: true
+  use_streaming: true  
+  intelligent_mode: true
 
 llm:
-  active_provider: "openrouter"  # 引用 defaults/llm_providers.yaml 中的定义
+  # 可选: 覆盖默认提供商 (默认已设为openrouter)
+  active_provider: "openrouter"
 
 mcp:
   enabled: true
   auto_discover: true
-  # 开发环境启用的服务器 - 暂时只启用最稳定的服务器
+  # 启用的MCP服务器 (默认: filesystem, my-search)
   enabled_servers:
     - "filesystem"
-    #- "sequential-thinking"
-    # 暂时禁用SSE服务器以避免异步生成器错误
-    - "my-search"  
+    - "my-search"
+    # 可选启用: "sequential-thinking" (较不稳定)
 
 logging:
   level: "INFO"
-  console_level: "USER"      # Show only user-relevant info in console
-  file_level: "DEBUG"        # Full technical details in file
-  format: "user_friendly"    # Clean console format
+  console_level: "USER"      # 控制台显示用户友好信息
+  file_level: "DEBUG"        # 文件记录详细技术信息
+  format: "user_friendly"    # 简洁控制台格式
   file: "logs/development.log"
-  structured_file: "logs/metrics/dev-metrics.jsonl"  # JSON metrics
-  max_file_size: "5MB"
-  backup_count: 5
+  structured_file: "logs/metrics/dev-metrics.jsonl"
   enable_colors: true
-  show_timestamps: false     # No timestamps in console for cleaner UX
+  show_timestamps: false     # 控制台不显示时间戳，更简洁
 
-environment:
-  env_file: ".env"
-  env_prefix: "TINYAGENT_" 
+# 注意: 所有其他配置使用内置智能默认值
+# 如需更多自定义，请使用环境变量覆盖 

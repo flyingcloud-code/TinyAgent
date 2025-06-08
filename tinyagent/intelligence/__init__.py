@@ -1,16 +1,13 @@
 """
-Intelligence Module for TinyAgent
-Implements core intelligence components for autonomous agent behavior.
+TinyAgent Intelligence Module - Simplified
+简化的智能模块，遵循专家版本的简洁原则
 """
 
-# 🔧 CRITICAL FIX: Import and export INTELLIGENCE_AVAILABLE
+# 🔧 简化的智能组件导入
 try:
-    from .planner import TaskPlanner
-    from .memory import ConversationMemory  
-    from .selector import ToolSelector
+    from .planner import TaskPlanner, TaskPlan, TaskStep
     from .reasoner import ReasoningEngine
-    from .actor import ActionExecutor
-    from .observer import ResultObserver
+    from .executor import ActionExecutor, ActionResult
     from .intelligent_agent import IntelligentAgent, IntelligentAgentConfig
     
     # Intelligence is available if all components loaded successfully
@@ -25,14 +22,23 @@ except ImportError as e:
     
     class IntelligentAgentConfig:
         pass
+    
+    class TaskPlanner:
+        pass
+    
+    class ReasoningEngine:
+        pass
+    
+    class ActionExecutor:
+        pass
 
 __all__ = [
     "TaskPlanner",
-    "ConversationMemory", 
-    "ToolSelector",
+    "TaskPlan", 
+    "TaskStep",
     "ReasoningEngine",
-    "ActionExecutor", 
-    "ResultObserver",
+    "ActionExecutor",
+    "ActionResult",
     "IntelligentAgent",
     "IntelligentAgentConfig",
     "INTELLIGENCE_AVAILABLE"  # 🔧 CRITICAL: Export this flag

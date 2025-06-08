@@ -1,5 +1,5 @@
-"""
-TinyAgent MCP Module
+"""TinyAgent MCP Package - Simplified"""
 
-This module handles Model Context Protocol integration and tool management.
-""" 
+from .manager import MCPManager, ToolInfo, ServerInfo, get_mcp_manager
+
+__all__ = ['MCPManager', 'ToolInfo', 'ServerInfo', 'get_mcp_manager'] 

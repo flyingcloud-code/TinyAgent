@@ -59,7 +59,7 @@ except ImportError as e:
     Runner = None
 
 from ..core.config import TinyAgentConfig, get_config
-from ..mcp.manager import MCPServerManager
+from ..mcp.manager import MCPManager
 from ..core.logging import (
     get_logger, log_user, log_agent, log_tool, log_technical, 
     MCPToolMetrics, USER_LEVEL, AGENT_LEVEL, TOOL_LEVEL
@@ -478,7 +478,7 @@ class TinyAgent:
             server for server in config.mcp.servers.values() 
             if server.enabled
         ]
-        self.mcp_manager = MCPServerManager(enabled_servers)
+        self.mcp_manager = MCPManager(enabled_servers)
         
         # Persistent connection management
         self._persistent_connections = {}  # server_name -> connection
@@ -956,54 +956,7 @@ class TinyAgent:
             log_technical("debug", f"Full traceback: {traceback.format_exc()}")
             # Don't raise - allow intelligent agent to work without MCP tools
 
-    async def _register_mcp_tools_basic(self, intelligent_agent):
-        """
-        Basic MCP tool registration (for compatibility)
-        
-        Args:
-            intelligent_agent: The IntelligentAgent instance
-        """
-        try:
-            # Ensure MCP connections are established
-            connected_servers = await self._ensure_mcp_connections()
-            
-            if not connected_servers:
-                log_technical("info", "No MCP servers available for basic registration")
-                return
-            
-            # Collect all available tools from connected servers
-            mcp_tools = []
-            for server_name, connection in self._persistent_connections.items():
-                try:
-                    # Get tools from the connection
-                    if hasattr(connection, 'list_tools'):
-                        server_tools = await connection.list_tools()
-                        if hasattr(server_tools, 'tools'):
-                            for tool in server_tools.tools:
-                                mcp_tools.append({
-                                    'name': tool.name,
-                                    'description': tool.description or f"Tool from {server_name}",
-                                    'server': server_name,
-                                    'function': None  # Will be handled by MCP execution
-                                })
-                        else:
-                            log_technical("warning", f"Server {server_name} returned unexpected tools format")
-                    else:
-                        log_technical("warning", f"Server {server_name} does not support list_tools")
-                except Exception as e:
-                    log_technical("warning", f"Error getting tools from {server_name}: {e}")
-                    continue
-            
-            # Register tools with intelligent agent if available
-            if mcp_tools:
-                if hasattr(intelligent_agent, 'register_mcp_tools'):
-                    intelligent_agent.register_mcp_tools(mcp_tools)
-                log_technical("info", f"Basic registration: {len(mcp_tools)} MCP tools")
-            else:
-                log_technical("info", "No MCP tools available to register")
-                
-        except Exception as e:
-            log_technical("error", f"Error in basic MCP tool registration: {e}")
+# Removed _register_mcp_tools_basic - redundant with _register_mcp_tools_with_intelligent_agent
 
     async def _ensure_mcp_connections(self) -> List[Any]:
         """
@@ -1193,53 +1146,38 @@ class TinyAgent:
     
     def run_sync(self, message: str, **kwargs) -> Any:
         """
-        Run the agent synchronously.
+        Run the agent synchronously using simplified execution path.
         
         Args:
             message: Input message for the agent
-            **kwargs: Additional arguments passed to Runner.run_sync
+            **kwargs: Additional arguments passed to async run method
             
         Returns:
             Agent execution result
         """
         try:
-            # Always use async method for new architecture
-            # Check if we have any configured MCP servers
-            has_mcp_servers = len(self.mcp_manager.server_configs) > 0
+            log_technical("info", f"Running agent synchronously: {message[:100]}...")
             
-            if has_mcp_servers:
-                # Use async method for potential MCP operations
-                try:
-                    # Try to get current event loop
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # If in already running event loop, create new thread
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(self._run_in_new_loop, message, **kwargs)
-                            return future.result()
-                    else:
-                        # If event loop not running, run directly
-                        return loop.run_until_complete(self.run(message, **kwargs))
-                except RuntimeError:
-                    # No event loop, create new one
-                    return asyncio.run(self.run(message, **kwargs))
-            else:
-                # No MCP servers configured, can use simple sync method
-                simple_agent = self._create_simple_agent()
-                log_technical("info", f"Running agent synchronously with message: {message[:100]}...")
-                
-                result = Runner.run_sync(
-                    starting_agent=simple_agent,
-                    input=message,
-                    **kwargs
-                )
-                
-                log_technical("info", "Agent execution completed successfully")
-                return result
+            # 🔧 SIMPLIFIED: Always use the async intelligent mode
+            # Handle async execution in sync context
+            try:
+                # Try to get current event loop
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # If in already running event loop, create new thread
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(self._run_in_new_loop, message, **kwargs)
+                        return future.result()
+                else:
+                    # If event loop not running, run directly
+                    return loop.run_until_complete(self.run(message, **kwargs))
+            except RuntimeError:
+                # No event loop, create new one
+                return asyncio.run(self.run(message, **kwargs))
             
         except Exception as e:
-            log_technical("error", f"Agent execution failed: {e}")
+            log_technical("error", f"Synchronous agent execution failed: {e}")
             raise
     
     def _run_in_new_loop(self, message: str, **kwargs) -> Any:
@@ -1345,21 +1283,66 @@ class TinyAgent:
             # Ensure connections are established
             await self._ensure_mcp_connections()
             
-            # Get tools from the connections
+            # Get tools from the connections using enhanced discovery logic
             for server_name, connection in self._persistent_connections.items():
                 try:
                     # Get tools from the connection
                     if hasattr(connection, 'list_tools'):
                         server_tools = await connection.list_tools()
+                        
+                        # 🔧 ENHANCED: Use the same logic as MCPManager for better compatibility
+                        tools_list = []
                         if hasattr(server_tools, 'tools'):
-                            for tool in server_tools.tools:
-                                tools.append(tool.name)
+                            tools_list = server_tools.tools
+                            log_technical("debug", f"Server {server_name} uses .tools attribute, tool count: {len(tools_list)}")
+                        elif isinstance(server_tools, list):
+                            tools_list = server_tools
+                            log_technical("debug", f"Server {server_name} direct list response, tool count: {len(tools_list)}")
                         else:
-                            log_technical("warning", f"Server {server_name} tools response format unexpected")
+                            # Try more response formats
+                            if hasattr(server_tools, 'result') and hasattr(server_tools.result, 'tools'):
+                                tools_list = server_tools.result.tools
+                                log_technical("debug", f"Server {server_name} uses .result.tools attribute, tool count: {len(tools_list)}")
+                            elif hasattr(server_tools, 'content'):
+                                content = server_tools.content
+                                if isinstance(content, list):
+                                    tools_list = content
+                                    log_technical("debug", f"Server {server_name} uses .content list, tool count: {len(tools_list)}")
+                                elif hasattr(content, 'tools'):
+                                    tools_list = content.tools
+                                    log_technical("debug", f"Server {server_name} uses .content.tools, tool count: {len(tools_list)}")
+                                else:
+                                    log_technical("warning", f"Server {server_name} content format unknown: {type(content)}")
+                                    continue
+                            else:
+                                log_technical("warning", f"Server {server_name} tools response format unexpected: {type(server_tools)}")
+                                log_technical("debug", f"Response attributes: {dir(server_tools)}")
+                                try:
+                                    log_technical("debug", f"Response content: {str(server_tools)[:200]}...")
+                                except:
+                                    log_technical("debug", "Cannot print response content")
+                                continue
+                        
+                        # Extract tool names
+                        for tool in tools_list:
+                            try:
+                                tool_name = getattr(tool, 'name', None)
+                                if tool_name:
+                                    tools.append(tool_name)
+                                    log_technical("debug", f"Found tool: {tool_name}")
+                                else:
+                                    log_technical("warning", f"Tool missing name attribute: {tool}")
+                            except Exception as tool_error:
+                                log_technical("warning", f"Error processing tool {getattr(tool, 'name', 'unknown')}: {tool_error}")
+                                continue
+                                
+                        log_technical("info", f"Server {server_name} discovered {len(tools_list)} tools")
                     else:
                         log_technical("warning", f"Server {server_name} does not support list_tools")
                 except Exception as e:
                     log_technical("warning", f"Error getting tools from {server_name}: {e}")
+                    import traceback
+                    log_technical("debug", f"Full traceback: {traceback.format_exc()}")
                     continue
         except Exception as e:
             log_technical("error", f"Error in async tool discovery: {e}")
@@ -1384,7 +1367,7 @@ class TinyAgent:
             server for server in config.mcp.servers.values() 
             if server.enabled
         ]
-        self.mcp_manager = MCPServerManager(enabled_servers)
+        self.mcp_manager = MCPManager(enabled_servers)
         
         # Reset connection state for lazy loading
         self._persistent_connections.clear()
@@ -1428,7 +1411,20 @@ class TinyAgent:
         
         for server_name, connection in self._persistent_connections.items():
             try:
-                await connection.close()
+                # 🔧 FIX: 处理不同类型的MCP服务器关闭方法
+                if hasattr(connection, '__aexit__'):
+                    # 对于上下文管理器，使用 __aexit__
+                    await connection.__aexit__(None, None, None)
+                elif hasattr(connection, 'close'):
+                    await connection.close()
+                elif hasattr(connection, 'shutdown'):
+                    await connection.shutdown()
+                elif hasattr(connection, 'disconnect'):
+                    await connection.disconnect()
+                else:
+                    # 如果没有明确的关闭方法，尝试删除引用
+                    log_technical("debug", f"Server {server_name} has no explicit close method, removing reference")
+                
                 log_technical("debug", f"Closed MCP connection: {server_name}")
             except Exception as e:
                 log_technical("warning", f"Error closing MCP connection {server_name}: {e}")
@@ -1636,6 +1632,7 @@ class TinyAgent:
                 enable_learning=getattr(self.config.agent, 'enable_learning', True)
             )
             
+            # TODO by code review: base_agent created here and pass to intelligent agent, intelligent assign it to planner, planner assign it to reasoning_engine. is that expected?
             # Create base LLM agent for the intelligent agent
             base_agent = self._create_simple_agent()
             
@@ -1651,53 +1648,19 @@ class TinyAgent:
             self._intelligent_agent.set_mcp_tool_executor(mcp_tool_executor)
             log_technical("info", "MCP tool executor registered with IntelligentAgent")
             
-            # Initialize Enhanced MCP context builder if available
+            # Initialize simplified MCP integration for IntelligentAgent
             try:
-                # Import enhanced MCP context builder components
-                from ..mcp.context_builder import AgentContextBuilder
-                from ..mcp.cache import MCPToolCache
-                from ..mcp.manager import EnhancedMCPServerManager
+                # Use existing simplified MCP manager
+                if hasattr(self, 'mcp_manager') and self.mcp_manager is not None:
+                    # Store reference to MCP manager in IntelligentAgent
+                    self._intelligent_agent.mcp_manager = self.mcp_manager
+                    log_technical("info", "Simplified MCP manager attached to IntelligentAgent")
+                    log_technical("info", f"MCP manager class: {type(self.mcp_manager).__name__}")
+                else:
+                    log_technical("warning", "No MCP manager available for IntelligentAgent")
                 
-                # Initialize enhanced MCP manager if not already done
-                if not hasattr(self, 'mcp_manager') or self.mcp_manager is None:
-                    # Create enhanced MCP manager with tool cache
-                    self.mcp_manager = EnhancedMCPServerManager(
-                        server_configs=self.config.mcp.servers,
-                        tool_cache=None,  # Will create its own cache
-                        cache_duration=300,  # 5 minutes
-                        enable_performance_tracking=True
-                    )
-                    log_technical("info", "Created EnhancedMCPServerManager for IntelligentAgent")
-                
-                # Ensure the MCP manager has a tool cache
-                if not hasattr(self.mcp_manager, 'tool_cache') or self.mcp_manager.tool_cache is None:
-                    # Create tool cache for the MCP manager if it doesn't have one
-                    self.mcp_manager.tool_cache = MCPToolCache(
-                        cache_duration=300,  # 5 minutes
-                        max_cache_size=100,
-                        persist_cache=True
-                    )
-                    log_technical("info", "Created tool cache for EnhancedMCPServerManager")
-                
-                # Get the tool cache reference
-                tool_cache = self.mcp_manager.tool_cache
-                
-                # Create and set MCP context builder for IntelligentAgent
-                context_builder = AgentContextBuilder(tool_cache)
-                
-                # Set MCP context builder and related components in IntelligentAgent
-                self._intelligent_agent.mcp_context_builder = context_builder
-                self._intelligent_agent.tool_cache = tool_cache
-                self._intelligent_agent.mcp_manager = self.mcp_manager  # Store reference to MCP manager
-                
-                log_technical("info", "Enhanced MCP context builder initialized for IntelligentAgent")
-                log_technical("info", f"MCP manager class: {type(self.mcp_manager).__name__}")
-                log_technical("info", f"Tool cache class: {type(tool_cache).__name__}")
-                
-            except ImportError as e:
-                log_technical("warning", f"Enhanced MCP context builder not available: {e}")
             except Exception as e:
-                log_technical("warning", f"Error initializing enhanced MCP context builder: {e}")
+                log_technical("warning", f"Error initializing MCP integration: {e}")
                 import traceback
                 log_technical("debug", f"Full traceback: {traceback.format_exc()}")
             

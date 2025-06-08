@@ -12,22 +12,83 @@ from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass
 
 from .planner import TaskPlanner
-from .memory import ConversationMemory  
-from .selector import ToolSelector
 from .reasoner import ReasoningEngine
-from .actor import ActionExecutor
-from .observer import ResultObserver, ObservationLevel
+from .executor import ActionExecutor
 
-# Import MCP context builder
-try:
-    from ..mcp.context_builder import AgentContextBuilder, AgentToolContext
-    from ..mcp.cache import MCPToolCache
-    MCP_CONTEXT_AVAILABLE = True
-except ImportError:
-    AgentContextBuilder = None
-    AgentToolContext = None
-    MCPToolCache = None
-    MCP_CONTEXT_AVAILABLE = False
+# 🔧 SIMPLIFIED: 内联简化组件，删除过度设计的模块
+class ConversationMemory:
+    """简化的对话记忆组件"""
+    def __init__(self, max_turns=20):
+        self.max_turns = max_turns
+        self.history = []
+    
+    def add_exchange(self, user_input: str, agent_response: str, **kwargs):
+        self.history.append({
+            "user": user_input,
+            "agent": agent_response,
+            "timestamp": time.time(),
+            **kwargs
+        })
+        if len(self.history) > self.max_turns:
+            self.history.pop(0)
+        return len(self.history)
+    
+    def get_relevant_context(self, query: str):
+        return self.history[-5:] if self.history else []
+
+class ToolSelector:
+    """简化的工具选择器"""
+    def __init__(self, available_tools=None, config=None):
+        self.available_tools = available_tools or {}
+        self.config = config
+    
+    async def select_tools_for_task(self, task_description: str, available_tools: list, task_context=None):
+        # 简化：返回所有可用工具
+        return type('obj', (object,), {'selected_tools': [tool['name'] for tool in available_tools[:5]]})
+    
+    def has_tool(self, tool_name: str) -> bool:
+        """检查是否有指定工具"""
+        return tool_name in self.available_tools
+    
+    def add_tool_capability(self, tool_name: str, capabilities=None, server_name=None, reliability_score=None, **kwargs):
+        """添加工具能力（兼容性方法）"""
+        tool_info = {
+            'name': tool_name,
+            'capabilities': capabilities or [],
+            'server_name': server_name,
+            'reliability_score': reliability_score or 0.8
+                 }
+        self.available_tools[tool_name] = tool_info
+    
+    def get_selection_statistics(self) -> dict:
+        """获取工具选择统计"""
+        return {
+            "total_tools": len(self.available_tools),
+            "selections_made": 0
+        }
+
+class ObservationLevel:
+    """观察级别枚举"""
+    BASIC = "basic"
+    DETAILED = "detailed"
+
+class ResultObserver:
+    """简化的结果观察者"""
+    def __init__(self, observation_level=ObservationLevel.BASIC, llm_agent=None):
+        self.observation_level = observation_level
+        self.llm_agent = llm_agent
+    
+    async def observe_result(self, action_id: str, result: Any, expected_outcome: str, execution_time: float, action_name: str):
+        return type('obj', (object,), {
+            'success_assessment': True,
+            'confidence': 0.8
+        })
+
+# 🔧 SIMPLIFIED: 删除复杂的MCP context builder，回归简洁性
+MCP_CONTEXT_AVAILABLE = False
+AgentContextBuilder = None
+AgentToolContext = None
+MCPToolCache = None
 
 logger = logging.getLogger(__name__)
 
@@ -71,47 +132,15 @@ class IntelligentAgent:
         self.llm_agent = llm_agent
         self.tinyagent_config = tinyagent_config
         
-        # Initialize MCP context builder if available
-        try:
-            from ..mcp.context_builder import AgentContextBuilder
-            from ..mcp.cache import MCPToolCache
-            if llm_agent:
-                # Create tool cache
-                self.tool_cache = MCPToolCache(
-                    cache_duration=300,  # 5 minutes
-                    max_cache_size=100,
-                    persist_cache=True
-                )
-                self.mcp_context_builder = AgentContextBuilder(self.tool_cache)
-                logger.info("MCP context builder initialized")
-            else:
-                logger.warning("MCP context components not available")
-        except Exception as e:
-            logger.warning(f"Failed to initialize MCP context builder: {e}")
-            self.mcp_context_builder = None
-            self.tool_cache = None
+        # 🔧 SIMPLIFIED: 删除复杂的MCP context builder
+        self.mcp_context_builder = None
+        self.tool_cache = None
         
-        # 🔧 CRITICAL FIX: Create specialized agents for each component instead of sharing base_agent
+        # 🔧 SIMPLIFIED: 简化组件初始化，删除复杂的专门化代理
         
-        # Create specialized planning agent with planning instructions
-        planning_agent = self._create_specialized_agent(
-            name="TaskPlanner",
-            instructions=self._get_planning_instructions(),
-            llm_agent=llm_agent
-        )
-        
-        # Create specialized reasoning agent with reasoning instructions  
-        reasoning_agent = self._create_specialized_agent(
-            name="ReasoningEngine", 
-            instructions=self._get_reasoning_instructions(),
-            llm_agent=llm_agent
-        )
-        
-        # Initialize intelligence components with specialized agents
         self.task_planner = TaskPlanner(
-            available_tools={},  # Will be populated when MCP tools are registered
-            planning_agent=planning_agent,  # 🔧 FIX: Use specialized planning agent
-            max_steps=self.config.max_reasoning_iterations
+            available_tools={},
+            llm_agent=llm_agent  # 直接使用基础代理
         )
         
         self.conversation_memory = ConversationMemory(
@@ -119,26 +148,25 @@ class IntelligentAgent:
         )
         
         self.tool_selector = ToolSelector(
-            available_tools={},  # Will be populated when MCP tools are registered
-            config=tinyagent_config  # Pass TinyAgent config for LLM settings
+            available_tools={},
+            config=tinyagent_config
         )
         
         self.reasoning_engine = ReasoningEngine(
-            llm_agent=reasoning_agent,  # 🔧 FIX: Use specialized reasoning agent
+            llm_agent=llm_agent,
             max_iterations=self.config.max_reasoning_iterations,
             confidence_threshold=self.config.confidence_threshold
         )
         
         self.action_executor = ActionExecutor(
-            max_concurrent_actions=self.config.max_concurrent_actions,
-            default_timeout=self.config.action_timeout,
-            llm_agent=llm_agent  # 🔧 NEW: Add LLM support for built-in actions
+            mcp_manager=None,  # 将在MCP工具注册时设置
+            llm_agent=llm_agent
         )
         
         observation_level = ObservationLevel.DETAILED if self.config.use_detailed_observation else ObservationLevel.BASIC
         self.result_observer = ResultObserver(
             observation_level=observation_level,
-            llm_agent=llm_agent  # 🔧 NEW: Add LLM support for enhanced insights
+            llm_agent=llm_agent
         )
         
         # Track execution state
@@ -158,90 +186,9 @@ class IntelligentAgent:
         self._mcp_tool_executor = None  # Will be set when MCP tools are registered
         self._available_mcp_tools = {}  # Maps tool_name -> server_name
     
-    def _create_specialized_agent(self, name: str, instructions: str, llm_agent) -> Any:
-        """
-        Create a specialized agent with specific instructions
-        
-        Args:
-            name: Name of the specialized agent
-            instructions: Specialized instructions for this agent
-            llm_agent: Base LLM agent to derive model settings from
-            
-        Returns:
-            Specialized Agent instance
-        """
-        try:
-            from agents import Agent
-            
-            # Extract model and settings from base agent
-            model_instance = llm_agent.model if hasattr(llm_agent, 'model') else None
-            
-            specialized_agent = Agent(
-                name=f"TinyAgent-{name}",
-                instructions=instructions,
-                model=model_instance
-            )
-            
-            logger.info(f"Created specialized agent: {name} with dedicated instructions")
-            return specialized_agent
-            
-        except Exception as e:
-            logger.warning(f"Failed to create specialized agent {name}: {e}, using base agent")
-            return llm_agent
+# 🔧 SIMPLIFIED: 删除复杂的专门化代理创建方法
     
-    def _get_planning_instructions(self) -> str:
-        """Get specialized instructions for task planning"""
-        return """You are an expert task planning agent. Your job is to analyze user requests and create detailed execution plans.
-
-Your responsibilities:
-1. Break down user requests into logical, executable steps
-2. Identify required tools for each step  
-3. Determine dependencies between steps
-4. Estimate realistic execution times
-5. Define clear success criteria
-6. Consider error recovery scenarios
-
-Output Format:
-Always provide your analysis in structured JSON format following the TaskPlan schema:
-- complexity: (simple/moderate/complex/very_complex)
-- steps: Array of step objects with id, description, tools, dependencies, duration, priority
-- success_criteria: Array of measurable success criteria
-
-Guidelines:
-- Maximum 10 steps per plan
-- Each step should be atomic and executable
-- Tool dependencies must be accurate
-- Time estimates should be realistic
-- Include validation steps where appropriate
-
-Think systematically and be thorough in your planning."""
-
-    def _get_reasoning_instructions(self) -> str:
-        """Get specialized instructions for reasoning engine"""
-        return """You are an expert reasoning agent implementing the ReAct (Reasoning + Acting) methodology.
-
-Your core process:
-1. THINK: Analyze the situation, understand the goal, and plan your approach
-2. ACT: Select and execute the most appropriate tool or action
-3. OBSERVE: Analyze the results of your action
-4. REFLECT: Learn from the outcome and decide next steps
-
-Reasoning Guidelines:
-- Always start by clearly understanding the user's goal
-- Think step-by-step and be explicit about your reasoning
-- Choose tools based on their specific capabilities and the current need
-- Observe results carefully and adjust your approach if needed
-- Reflect on whether you're making progress toward the goal
-- Stop when the goal is achieved or cannot be achieved
-
-Output Format:
-Structure your reasoning clearly:
-- Thought: Your analysis and reasoning
-- Action: The specific action/tool you're choosing  
-- Observation: What the results tell you
-- Reflection: What you learned and what to do next
-
-Be methodical, focused, and goal-oriented in your reasoning process."""
+# 🔧 SIMPLIFIED: 删除复杂的指令生成方法
     
     def _detect_tool_query(self, message: str) -> bool:
         """
@@ -374,50 +321,12 @@ Be methodical, focused, and goal-oriented in your reasoning process."""
         return "\n".join(response_parts)
 
     def _build_enhanced_tool_context(self, task_hint: Optional[str] = None) -> Optional[str]:
-        """
-        Build enhanced tool context using MCP context builder
-        
-        Args:
-            task_hint: Optional hint about the task to help focus tool selection
-            
-        Returns:
-            Enhanced tool context string if MCP context builder is available
-        """
-        if not self.mcp_context_builder:
-            return None
-        
-        try:
-            # Try to build tool context
-            tool_context = self.mcp_context_builder.build_tool_context(
-                task_hint=task_hint
-            )
-            
-            if tool_context and tool_context.context_text:
-                self._last_tool_context = tool_context
-                self._tool_context_cache_valid = True
-                logger.debug(f"Built enhanced tool context: {len(tool_context.context_text)} chars")
-                return tool_context.context_text
-            else:
-                logger.warning("Tool context builder returned empty context")
-                return None
-                
-        except Exception as e:
-            logger.warning(f"Error building enhanced tool context: {e}")
-            return None
+        """简化的工具上下文构建"""
+        return None  # 🔧 SIMPLIFIED: 删除复杂的MCP context builder
 
     def get_tool_context_summary(self) -> Dict[str, Any]:
-        """Get summary of current tool context"""
-        if not self._last_tool_context:
-            return {"available": False, "reason": "No tool context built"}
-        
-        return {
-            "available": True,
-            "tools_count": len(self._last_tool_context.available_tools),
-            "servers": list(self._last_tool_context.server_status.keys()),
-            "capabilities": list(self._last_tool_context.capabilities_summary.keys()),
-            "context_size": len(self._last_tool_context.context_text) if self._last_tool_context.context_text else 0,
-            "cache_valid": self._tool_context_cache_valid
-        }
+        """简化的工具上下文摘要"""
+        return {"available": False, "tools": 0, "servers": 0}
 
     def _create_tool_executor(self) -> Callable:
         """
@@ -486,189 +395,84 @@ Be methodical, focused, and goal-oriented in your reasoning process."""
 
     async def run(self, message: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Execute intelligent agent workflow with ReAct loop and enhanced tool context
+        Execute intelligent agent with simplified ReAct loop (专家版本对齐)
+        
+        核心原则: Think → Act → Observe 简单循环，删除复杂的7步流程
         
         Args:
             message: User input message
             context: Optional additional context
             
         Returns:
-            Comprehensive execution result
+            Simplified execution result
         """
         start_time = time.time()
-        task_id = str(uuid.uuid4())  # Generate unique task ID
-        logger.info(f"IntelligentAgent starting: task_id={task_id}, message='{message[:100]}...'")
+        task_id = str(uuid.uuid4())
+        logger.info(f"IntelligentAgent simplified ReAct: {message[:100]}...")
         
         try:
-            # 🔧 NEW: Check if user is asking about tools
+            # 🔧 SIMPLIFIED: Special case for tool queries
             if self._detect_tool_query(message):
-                logger.info("Detected tool query, handling directly")
+                logger.info("Tool query detected, direct response")
                 tool_response = await self._handle_tool_query()
                 return {
                     "success": True,
                     "answer": tool_response,
-                    "task_plan": {"task_id": task_id, "complexity": "simple", "steps": 1},
-                    "reasoning": {"iterations": 0, "confidence": 1.0, "steps": 0},
+                    "reasoning": {"iterations": 1, "confidence": 1.0, "steps": 1},
                     "tools_used": [],
-                    "execution_time": time.time() - start_time,
-                    "tool_context": self.get_tool_context_summary()
+                    "execution_time": time.time() - start_time
                 }
             
-            # 0. Build enhanced tool context for this task
-            enhanced_context = self._build_enhanced_tool_context(task_hint=message)
-            if enhanced_context:
-                logger.info("Enhanced tool context built and available for planning")
+            # 🔧 SIMPLIFIED ReAct LOOP: 只有3个核心步骤
             
-            # 1. Add message to conversation memory
-            conversation_turn = self.conversation_memory.add_exchange(
-                user_input=message,
-                agent_response="",  # Will be updated later
-                task_id=task_id
-            )
-            logger.info(f"Added to conversation memory: turn {conversation_turn}")
-            
-            # 2. Task Planning - Analyze and decompose the task with tool context
-            planning_context = context or {}
-            if enhanced_context:
-                planning_context["available_tools_context"] = enhanced_context
-                planning_context["tool_summary"] = self.get_tool_context_summary()
-            
-            task_plan = await self.task_planner.create_plan(
-                task_description=message,
-                context=planning_context
-            )
-            logger.info(f"Task planned: {task_plan.complexity.value}, {len(task_plan.steps)} steps")
-            logger.info(f"Task plan details: {task_plan}")
-            
-            # Update conversation memory with task plan
-            # First create the task context if it doesn't exist
-            task_context = self.conversation_memory.create_task_context(
-                task_id=task_plan.task_id,
-                initial_request=message,
-                metadata={
-                    "complexity": task_plan.complexity.value,
-                    "plan_steps": [step.description for step in task_plan.steps],
-                    "estimated_duration": task_plan.total_estimated_duration,
-                    "tool_context_available": enhanced_context is not None
-                }
-            )
-            
-            # 3. Tool Selection - Identify needed tools based on plan with enhanced context
+            # 1. 准备工具上下文 (简化版)
             available_tools = await self._get_available_tools()
+            logger.info(f"Available tools: {len(available_tools)} tools ready")
             
-            # Enhance available tools with MCP context information
-            if self._last_tool_context:
-                for mcp_tool in self._last_tool_context.available_tools:
-                    available_tools.append({
-                        "name": mcp_tool.name,
-                        "description": mcp_tool.description,
-                        "type": "mcp",
-                        "server": mcp_tool.server_name,
-                        "category": mcp_tool.category,
-                        "performance": mcp_tool.performance_metrics.__dict__ if mcp_tool.performance_metrics else {}
-                    })
-            
-            tool_selection = await self.tool_selector.select_tools_for_task(
-                task_description=message,
-                available_tools=available_tools,
-                task_context=task_context
-            )
-            logger.info(f"Tools selected: {tool_selection.selected_tools}")
-            
-            # Register selected tools with action executor
-            for tool_name in tool_selection.selected_tools:
-                # For now, we don't have actual tool functions to register
-                # TODO: Implement proper tool function registration
-                logger.debug(f"Would register tool: {tool_name}")
-            
-            # 4. Reasoning and Acting - Execute ReAct loop with tool context
+            # 2. 核心ReAct循环 - 思考→行动→观察
             reasoning_context = {
-                "task_plan": task_plan,
-                "selected_tools": tool_selection.selected_tools,
-                "available_tools": available_tools,  # Add available tools to context
-                "conversation_context": self.conversation_memory.get_relevant_context(message),
-                "original_message": message,
-                "enhanced_tool_context": enhanced_context,
-                "tool_context_summary": self.get_tool_context_summary()
+                "available_tools": available_tools,
+                "conversation_history": self.conversation_memory.get_relevant_context(message)[:5],  # 限制历史长度
+                "original_message": message
             }
             
             reasoning_result = await self.reasoning_engine.reason_and_act(
                 goal=message,
                 context=reasoning_context
             )
-            logger.info(f"Reasoning completed: success={reasoning_result.success}, "
-                       f"steps={len(reasoning_result.steps)}, confidence={reasoning_result.confidence:.2f}")
+            logger.info(f"ReAct completed: success={reasoning_result.success}, "
+                       f"iterations={reasoning_result.iterations}")
             
-            # 5. Result Observation and Learning
-            if self.config.enable_learning:
-                for i, step in enumerate(reasoning_result.steps):
-                    if step.action and step.observation:
-                        observation = await self.result_observer.observe_result(
-                            action_id=f"reasoning_step_{i}",
-                            result=step.observation,
-                            expected_outcome=step.thought,
-                            execution_time=step.duration,
-                            action_name=step.action
-                        )
-                        logger.info(f"Observation {i}: success={observation.success_assessment}, "
-                                   f"confidence={observation.confidence:.2f}")
-            
-            # 6. Update conversation memory with results
-            # Update conversation with final response using add_exchange
+            # 3. 简化记忆更新
             final_response = reasoning_result.final_answer or "Task completed"
             self.conversation_memory.add_exchange(
                 user_input=message,
                 agent_response=final_response,
-                tools_used=tool_selection.selected_tools,
-                execution_time=time.time() - start_time,
-                task_id=task_plan.task_id
+                execution_time=time.time() - start_time
             )
             
-            # Update task completion status
-            self.conversation_memory.update_task_context(
-                task_id=task_plan.task_id,
-                status="completed" if reasoning_result.success else "failed",
-                metadata={
-                    "success": reasoning_result.success,
-                    "result": reasoning_result.final_answer,
-                    "execution_time": reasoning_result.total_duration,
-                    "tool_context_used": enhanced_context is not None
-                }
-            )
-            
-            # 7. Generate comprehensive result with enhanced tool context information
+            # 4. 简化结果返回
             execution_time = time.time() - start_time
             result = {
                 "success": reasoning_result.success,
                 "answer": reasoning_result.final_answer,
-                "task_plan": {
-                    "task_id": task_plan.task_id,
-                    "complexity": task_plan.complexity.value,
-                    "steps": len(task_plan.steps),
-                    "estimated_time": task_plan.total_estimated_duration
-                },
                 "reasoning": {
                     "iterations": reasoning_result.iterations,
                     "confidence": reasoning_result.confidence,
                     "steps": len(reasoning_result.steps)
                 },
-                "tools_used": tool_selection.selected_tools,
-                "execution_time": execution_time,
-                "conversation_turn": conversation_turn,
-                "learning_enabled": self.config.enable_learning,
-                "tool_context": self.get_tool_context_summary()
+                "tools_used": [step.action for step in reasoning_result.steps if step.action],
+                "execution_time": execution_time
             }
             
-            logger.info(f"IntelligentAgent completed: success={result['success']}, "
-                       f"time={execution_time:.2f}s, tools_context_used={enhanced_context is not None}")
-            
+            logger.info(f"IntelligentAgent simplified: success={result['success']}, time={execution_time:.2f}s")
             return result
             
         except Exception as e:
-            logger.error(f"IntelligentAgent execution failed: {e}")
+            logger.error(f"IntelligentAgent ReAct failed: {e}")
             
-            # Add error to conversation memory
-            error_message = f"Execution failed: {str(e)}"
+            # 透明错误处理，不隐藏错误
+            error_message = f"ReAct loop failed: {str(e)}"
             self.conversation_memory.add_exchange(
                 user_input=message,
                 agent_response=error_message,
@@ -679,8 +483,7 @@ Be methodical, focused, and goal-oriented in your reasoning process."""
                 "success": False,
                 "answer": error_message,
                 "error": str(e),
-                "execution_time": time.time() - start_time,
-                "tool_context": self.get_tool_context_summary()
+                "execution_time": time.time() - start_time
             }
     
     async def _get_available_tools(self) -> List[Dict[str, Any]]:
@@ -905,7 +708,7 @@ Be methodical, focused, and goal-oriented in your reasoning process."""
     def set_llm_agent(self, llm_agent):
         """Update the LLM agent for all components"""
         self.llm_agent = llm_agent
-        self.task_planner.planning_agent = llm_agent
+        self.task_planner.llm_agent = llm_agent
         self.reasoning_engine.llm_agent = llm_agent
         logger.info("LLM agent updated for all intelligence components") 
 
