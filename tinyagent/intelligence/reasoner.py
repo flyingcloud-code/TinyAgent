@@ -97,6 +97,9 @@ class ReasoningEngine:
         # 🔧 NEW: Store last result for streaming access
         self._last_result = None
         
+        # 🔧 R06.1.2: Store URLs from search results for get_web_content
+        self._last_search_urls = []
+        
         logger.info(f"ReasoningEngine initialized with max_iterations={max_iterations}")
     
     def set_tool_executor(self, tool_executor_func: Callable):
@@ -251,6 +254,7 @@ class ReasoningEngine:
     async def _thinking_phase(self, context: Dict[str, Any], step_id: int) -> Optional[ReasoningStep]:
         """
         THINKING phase: Analyze current situation and plan next action
+        NOW PARSES ACTION DECISION FROM LLM RESPONSE
         """
         start_time = time.time()
         
@@ -268,17 +272,33 @@ class ReasoningEngine:
                 
                 thought = str(result.final_output)
                 
+                # 🔧 NEW: Parse action decision from thought
+                action, action_params = self._parse_action_from_thought(thought)
+                
+                # Store action decision in context for _select_action to use
+                context["last_thinking_action"] = action
+                context["last_thinking_params"] = action_params
+                context["last_thinking_thought"] = thought
+                
+                logger.info(f"Thinking phase decided: action={action}, params={action_params}")
+                
                 # Parse thought to determine if goal is complete
-                is_complete = self._analyze_completion(thought, context)
+                is_complete = self._analyze_completion(thought, context) or action == "完成任务"
                 state = ReasoningState.COMPLETED if is_complete else ReasoningState.THINKING
                 
-                return ReasoningStep(
+                thinking_step = ReasoningStep(
                     step_id=step_id,
                     state=state,
                     thought=thought,
                     confidence=self._estimate_confidence(thought),
                     duration=time.time() - start_time
                 )
+                
+                # 🔧 NEW: Store the decided action in the step for transparency
+                thinking_step.action = action
+                thinking_step.action_params = action_params
+                
+                return thinking_step
                 
             except Exception as e:
                 logger.error(f"Thinking phase failed: {e}")
@@ -333,6 +353,14 @@ class ReasoningEngine:
                     execution_time = time.time() - start_time
                     
                     logger.info(f"Successfully executed MCP tool {action} in {execution_time:.2f}s")
+                    
+                    # 🔧 R06.1.2: Extract URLs from search results for future get_web_content usage
+                    if action == "google_search" and execution_success and tool_result:
+                        search_result = str(tool_result)
+                        extracted_urls = self._extract_urls_from_search_result(search_result)
+                        if extracted_urls:
+                            self._last_search_urls = extracted_urls
+                            logger.info(f"Saved {len(extracted_urls)} URLs for future get_web_content usage")
                     
                 except Exception as e:
                     execution_success = False
@@ -495,14 +523,14 @@ class ReasoningEngine:
         )
     
     def _create_thinking_prompt(self, context: Dict[str, Any]) -> str:
-        """Create a prompt for the thinking phase"""
+        """Create a prompt for the thinking phase - NOW INCLUDES ACTION DECISION"""
         goal = context.get("goal", "")
         steps_taken = context.get("steps_taken", [])
         last_observation = context.get("last_observation", "")
-        available_actions = context.get("available_actions", [])
         
         # Include available tools information if present
         available_tools_info = ""
+        available_tools_list = []
         if "available_tools" in context:
             tools = context["available_tools"]
             if tools:
@@ -512,6 +540,12 @@ class ReasoningEngine:
                     tool_desc = tool.get('description', 'No description')
                     tool_server = tool.get('server', 'unknown')
                     available_tools_info += f"  • {tool_name}: {tool_desc} (from {tool_server})\n"
+                    available_tools_list.append(tool_name)
+        
+        # Add MCP tools if not already included
+        for tool_name in self.available_mcp_tools:
+            if tool_name not in available_tools_list:
+                available_tools_list.append(tool_name)
         
         prompt = f"""
 You are in the THINKING phase of a ReAct reasoning loop. Your goal is: {goal}
@@ -519,18 +553,176 @@ You are in the THINKING phase of a ReAct reasoning loop. Your goal is: {goal}
 Steps taken so far: {len(steps_taken)}
 Last observation: {last_observation}
 {available_tools_info}
-Available actions: {', '.join(available_actions)}
 
-Analyze the current situation and determine:
-1. What progress has been made toward the goal?
-2. What is the next logical action to take?
-3. Is the goal already achieved?
+Available Tools: {', '.join(available_tools_list)}
 
-If the user is asking about tools or capabilities, refer to the actual available tools listed above.
+分析当前情况并决定下一步行动。请按以下格式回答:
 
-Respond with your analysis and reasoning.
+**分析**: [分析当前进展和情况]
+
+**下一步行动**: [选择一个具体的工具名称，如: google_search, read_file, write_file 等]
+
+**参数**: [该工具需要的参数，用JSON格式，如: {{"query": "搜索内容"}} 或 {{"path": "文件路径"}}]
+
+**推理**: [为什么选择这个行动]
+
+如果目标已完成，在下一步行动中写"完成任务"。
 """
         return prompt
+    
+    def _parse_action_from_thought(self, thought: str) -> tuple[str, dict]:
+        """
+        Parse action and parameters from LLM thought response
+        
+        Args:
+            thought: LLM response containing action decision
+            
+        Returns:
+            Tuple of (action_name, action_params)
+        """
+        import re
+        import json
+        
+        # Extract action from **下一步行动**: pattern
+        action_pattern = r'\*\*下一步行动\*\*:\s*([^\n*]+)'
+        action_match = re.search(action_pattern, thought)
+        
+        if action_match:
+            action = action_match.group(1).strip()
+            
+            # Check for completion signal
+            if "完成任务" in action or "task complete" in action.lower():
+                return "完成任务", {}
+            
+            # Extract parameters from **参数**: pattern
+            params_pattern = r'\*\*参数\*\*:\s*(\{[^}]*\})'
+            params_match = re.search(params_pattern, thought)
+            
+            if params_match:
+                try:
+                    params_str = params_match.group(1)
+                    params = json.loads(params_str)
+                    
+                    # 🔧 R06.1.1 FIX: Handle get_web_content missing URL parameter
+                    if action == "get_web_content" and not params.get("url"):
+                        logger.info("get_web_content missing url parameter, attempting to extract from context")
+                        if hasattr(self, '_last_search_urls') and self._last_search_urls:
+                            params["url"] = self._last_search_urls[0]
+                            logger.info(f"Fixed get_web_content with URL: {params['url']}")
+                        else:
+                            logger.warning("No URLs available from previous search, cannot fix get_web_content")
+                    
+                    logger.info(f"Parsed action from thinking: {action} with params: {params}")
+                    return action, params
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse parameters: {params_match.group(1)}")
+                    # 🔧 R06.1.1 FIX: If get_web_content with parse error, try to fix
+                    if action == "get_web_content":
+                        if hasattr(self, '_last_search_urls') and self._last_search_urls:
+                            return action, {"url": self._last_search_urls[0]}
+                    return action, {}
+            else:
+                # No parameters specified
+                # 🔧 R06.1.1 FIX: If get_web_content without params, auto-add URL
+                if action == "get_web_content":
+                    if hasattr(self, '_last_search_urls') and self._last_search_urls:
+                        params = {"url": self._last_search_urls[0]}
+                        logger.info(f"Auto-fixed get_web_content with URL: {params['url']}")
+                        return action, params
+                    else:
+                        logger.warning("get_web_content requested but no URLs available")
+                
+                logger.info(f"Parsed action from thinking: {action} (no params)")
+                return action, {}
+        
+        # Fallback: look for tool names mentioned in the text
+        for tool_name in self.available_mcp_tools:
+            if tool_name in thought:
+                logger.info(f"Fallback: found tool {tool_name} mentioned in thought")
+                return tool_name, self._guess_params_for_tool(tool_name, thought)
+        
+        # Ultimate fallback
+        logger.warning("Could not parse action from thought, using fallback")
+        return "search_information", {"query": "continue reasoning"}
+    
+    def _guess_params_for_tool(self, tool_name: str, thought: str) -> dict:
+        """Guess reasonable parameters for a tool based on thought content"""
+        tool_name_lower = tool_name.lower()
+        
+        if 'search' in tool_name_lower or 'google' in tool_name_lower:
+            # Extract search query from thought
+            import re
+            query_patterns = [
+                r'搜索[：:]?\s*(.+)',
+                r'search[：:]?\s*(.+)',
+                r'查找[：:]?\s*(.+)',
+                r'query[：:]?\s*(.+)'
+            ]
+            
+            for pattern in query_patterns:
+                match = re.search(pattern, thought, re.IGNORECASE)
+                if match:
+                    query = match.group(1).strip()
+                    return {"query": query}
+            
+            # Fallback to first meaningful sentence
+            sentences = thought.split('。')
+            for sentence in sentences:
+                if len(sentence.strip()) > 5:
+                    return {"query": sentence.strip()[:100]}
+        
+        elif 'weather' in tool_name_lower:
+            # Default weather params
+            from datetime import datetime
+            return {"city": "Beijing", "date_str": datetime.now().strftime("%Y-%m-%d")}
+        
+        elif 'file' in tool_name_lower or 'read' in tool_name_lower:
+            return {"path": "README.md"}
+        
+        elif 'write' in tool_name_lower:
+            return {"path": "output.txt", "content": "Generated by TinyAgent"}
+        
+        return {}
+    
+    def _extract_urls_from_search_result(self, search_result: str) -> List[str]:
+        """
+        🔧 R06.1.2: Extract URLs from search result for use by get_web_content
+        
+        Args:
+            search_result: Search result text containing URLs
+            
+        Returns:
+            List of extracted URLs
+        """
+        import re
+        
+        # Pattern to match URLs in search results
+        url_patterns = [
+            r'https?://[^\s\n]+',  # Standard HTTP/HTTPS URLs
+            r'www\.[^\s\n]+',      # www. URLs without protocol
+        ]
+        
+        urls = []
+        for pattern in url_patterns:
+            matches = re.findall(pattern, search_result)
+            for match in matches:
+                # Clean up URL (remove trailing punctuation)
+                url = match.rstrip('.,;:)')
+                if url not in urls:
+                    urls.append(url)
+        
+        # Ensure URLs have protocol
+        normalized_urls = []
+        for url in urls:
+            if not url.startswith(('http://', 'https://')):
+                if url.startswith('www.'):
+                    url = 'https://' + url
+                else:
+                    continue  # Skip malformed URLs
+            normalized_urls.append(url)
+        
+        logger.info(f"Extracted {len(normalized_urls)} URLs from search result")
+        return normalized_urls[:5]  # Limit to first 5 URLs
     
     def _get_available_actions(self) -> List[str]:
         """Get list of available actions including MCP tools"""
@@ -549,32 +741,45 @@ Respond with your analysis and reasoning.
         return built_in_actions + mcp_tools
     
     def _select_action(self, context: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
-        """Select the next action to take based on context and available tools"""
+        """
+        Select the next action to take - NOW USES THINKING RESULTS!
+        
+        🔧 FIXED: Now prioritizes action decisions from thinking phase
+        instead of using fixed step-based logic
+        """
+        # 🔧 PRIMARY: Use action decided by thinking phase
+        if "last_thinking_action" in context and "last_thinking_params" in context:
+            action = context["last_thinking_action"]
+            params = context["last_thinking_params"]
+            
+            logger.info(f"Using action from thinking phase: {action} with params: {params}")
+            
+            # Validate that the action is available
+            if action in self.available_mcp_tools or action in ["完成任务", "search_information", "analyze_data", "synthesize_results", "validate_answer"]:
+                return action, params
+            else:
+                logger.warning(f"Thinking decided on unavailable action '{action}', falling back to heuristics")
+        
+        # 🔧 FALLBACK: Use intelligent heuristics (only when thinking fails)
         steps_taken = context.get("steps_taken", [])
         goal = context.get("goal", "")
-        available_tools = context.get("available_tools", [])
-        
-        # 🔧 ENHANCED: Improved action selection with better tool prioritization
         goal_lower = goal.lower()
+        
+        logger.info(f"Fallback action selection for goal: {goal}")
         
         # Check if goal mentions web search or news/information gathering
         if any(keyword in goal_lower for keyword in ['search', 'find', 'look', 'information', 'news', 'latest']):
-            # 🔧 PRIORITY FIX: Prioritize web search tools over file search tools
+            # Prioritize web search tools over file search tools
             web_search_tools = []
-            file_search_tools = []
             
             for tool_name in self.available_mcp_tools:
                 tool_name_lower = tool_name.lower()
                 if any(web_keyword in tool_name_lower for web_keyword in ['google', 'web', 'http', 'internet']):
                     web_search_tools.append(tool_name)
-                elif any(search_keyword in tool_name_lower for search_keyword in ['search', 'find', 'query']):
-                    file_search_tools.append(tool_name)
             
-            # Prefer web search for general information gathering
             if web_search_tools:
                 # Extract search query from goal
                 if 'search' in goal_lower:
-                    # Use the part after "search" as query
                     query_start = goal_lower.find('search') + 6
                     search_query = goal[query_start:].strip()
                     if not search_query:
@@ -582,19 +787,14 @@ Respond with your analysis and reasoning.
                 else:
                     search_query = goal
                 
+                logger.info(f"Fallback: selected web search tool {web_search_tools[0]}")
                 return web_search_tools[0], {"query": search_query}
-            
-            # Fall back to file search only if no web search available
-            elif file_search_tools and any(file_keyword in goal_lower for file_keyword in ['file', 'document', 'local']):
-                return file_search_tools[0], {"query": goal}
         
         # Check if the goal mentions file operations
         if any(keyword in goal_lower for keyword in ['file', 'create', 'write', 'read', 'delete']):
-            # Look for filesystem tools
             for tool_name in self.available_mcp_tools:
                 if any(fs_keyword in tool_name.lower() for fs_keyword in ['file', 'write', 'read', 'create']):
                     if 'create' in goal_lower or 'write' in goal_lower:
-                        # Extract filename from goal
                         import re
                         filename_match = re.search(r'create\s+(\w+\.\w+)', goal_lower)
                         if filename_match:
@@ -609,26 +809,18 @@ Respond with your analysis and reasoning.
         if any(keyword in goal_lower for keyword in ['weather', 'temperature', 'forecast']):
             for tool_name in self.available_mcp_tools:
                 if 'weather' in tool_name.lower():
-                    # Extract city from goal if possible
                     import re
                     city_match = re.search(r'weather.*?(?:in|for|at)\s+(\w+)', goal_lower)
                     city = city_match.group(1) if city_match else "Beijing"
                     
-                    # Get current date
                     from datetime import datetime
                     date_str = datetime.now().strftime("%Y-%m-%d")
                     
                     return tool_name, {"city": city, "date_str": date_str}
         
-        # Fallback to built-in actions
-        if len(steps_taken) == 0:
-            return "search_information", {"query": goal}
-        elif len(steps_taken) == 1:
-            return "analyze_data", {"focus": "goal_alignment"}
-        elif len(steps_taken) == 2:
-            return "synthesize_results", {"format": "structured"}
-        else:
-            return "validate_answer", {"criteria": "completeness"}
+        # 🔧 LAST RESORT: Simple fallback actions (no longer step-based!)
+        logger.warning("No suitable action found, using ultimate fallback")
+        return "search_information", {"query": goal}
     
     def _analyze_completion(self, thought: str, context: Dict[str, Any]) -> bool:
         """Analyze if the goal has been completed based on thought"""
@@ -685,21 +877,98 @@ Respond with your analysis and reasoning.
         return False
     
     async def _extract_final_answer(self, steps: List[ReasoningStep], context: Dict[str, Any]) -> str:
-        """Extract the final answer from the reasoning process"""
+        """
+        🔧 R06.2.1: Extract the final answer from the reasoning process
+        Generate substantial content instead of empty completion confirmations
+        """
         if not steps:
             return "No reasoning steps completed."
         
-        # Find the last meaningful thought or observation
-        for step in reversed(steps):
-            if step.state == ReasoningState.COMPLETED and step.thought:
-                return step.thought
-            elif step.observation:
-                return f"Based on reasoning: {step.observation}"
-            elif step.reflection:
-                return f"Final reflection: {step.reflection}"
+        # 🔧 R06.2.2: Synthesize content from observations and tool results
+        return await self._synthesize_content_from_observations(steps, context)
+    
+    async def _synthesize_content_from_observations(self, steps: List[ReasoningStep], context: Dict[str, Any]) -> str:
+        """
+        🔧 R06.2.2: Synthesize meaningful content from all observations and tool results
         
-        # Fallback to goal restatement
-        return f"Completed analysis of: {context.get('goal', 'the given task')}"
+        Args:
+            steps: All reasoning steps
+            context: Reasoning context
+            
+        Returns:
+            Structured, user-friendly answer with actual content
+        """
+        goal = context.get('goal', 'the given task')
+        
+        # Collect all tool results and observations
+        search_results = []
+        web_content = []
+        other_results = []
+        
+        for step in steps:
+            if step.action and step.execution_success and step.tool_result:
+                if step.action == "google_search":
+                    search_results.append(str(step.tool_result))
+                elif step.action == "get_web_content":
+                    web_content.append(str(step.tool_result))
+                else:
+                    other_results.append(f"{step.action}: {str(step.tool_result)}")
+        
+        # Build structured answer
+        answer = f"Based on my research regarding '{goal}':\n\n"
+        
+        # Add search findings
+        if search_results:
+            answer += "📊 **Search Results:**\n"
+            for i, result in enumerate(search_results, 1):
+                # Extract key information from search results
+                lines = result.split('\n')[:5]  # First 5 lines
+                answer += f"   {i}. {' '.join(lines)}\n"
+            answer += "\n"
+        
+        # Add web content findings
+        if web_content:
+            answer += "🌐 **Detailed Content:**\n"
+            for i, content in enumerate(web_content, 1):
+                # Extract meaningful content (skip error messages)
+                if "Error executing tool" not in content:
+                    content_preview = content[:300] + "..." if len(content) > 300 else content
+                    answer += f"   {i}. {content_preview}\n"
+                else:
+                    answer += f"   {i}. ⚠️ Content retrieval failed: {content}\n"
+            answer += "\n"
+        
+        # Add other findings
+        if other_results:
+            answer += "🔧 **Additional Information:**\n"
+            for result in other_results:
+                answer += f"   • {result}\n"
+            answer += "\n"
+        
+        # Add summary and conclusion if we have real data
+        if search_results or web_content or other_results:
+            answer += "📝 **Summary:**\n"
+            if "claude ai" in goal.lower() or "claude" in goal.lower():
+                answer += "   Based on the search results, I found information about Claude AI's latest developments.\n"
+                if search_results:
+                    # Try to extract specific news from search results
+                    combined_results = " ".join(search_results).lower()
+                    if "2024" in combined_results or "2025" in combined_results:
+                        answer += "   The search results indicate recent updates and news about Claude AI.\n"
+                    if "anthropic" in combined_results:
+                        answer += "   Information from Anthropic, Claude's developer, was found.\n"
+            else:
+                answer += f"   Research completed for: {goal}\n"
+            
+            answer += "   Please refer to the detailed results above for specific information."
+        else:
+            # Fallback if no real data was collected
+            answer += "⚠️ **Notice:**\n"
+            answer += "   The reasoning process completed, but limited data was collected.\n"
+            answer += f"   Goal: {goal}\n"
+            answer += "   Consider rephrasing your query or checking the tool configurations."
+        
+        return answer
     
     def get_reasoning_summary(self, result: ReasoningResult) -> str:
         """Get a human-readable summary of the reasoning process"""

@@ -417,7 +417,8 @@ class TinyAgent:
         model_name: Optional[str] = None,
         api_key: Optional[str] = None,
         use_streaming: Optional[bool] = None,
-        intelligent_mode: Optional[bool] = None
+        intelligent_mode: Optional[bool] = None,
+        verbose: Optional[bool] = None
     ):
         """
         Initialize TinyAgent.
@@ -429,6 +430,7 @@ class TinyAgent:
             api_key: OpenAI API key (overrides environment)
             use_streaming: Whether to use streaming API for tool call logging (default: from config)
             intelligent_mode: Whether to use intelligent ReAct mode (default: from config or True if available)
+            verbose: Whether to show detailed tool results (default: False)
         """
         if not AGENTS_AVAILABLE:
             raise ImportError("OpenAI Agents SDK is required but not available")
@@ -480,10 +482,17 @@ class TinyAgent:
         ]
         self.mcp_manager = MCPManager(enabled_servers)
         
-        # Persistent connection management
-        self._persistent_connections = {}  # server_name -> connection
-        self._connection_status = {}       # server_name -> status
+        # 🔧 MCP connections management
+        self._persistent_connections = {}
         self._connections_initialized = False
+        self._connection_health = {}
+        
+        # ⚡ ITERATION 2: 简单工具调用缓存 (R05.2.1.1)
+        self._tool_cache = {}  # {cache_key: result}
+        self._cache_enabled = True  # 可通过参数禁用
+        
+        # 🎨 ITERATION 3: 可配置详细程度 (R05.3.1.2)
+        self.verbose = verbose if verbose is not None else False
         
         # Create the agent (delayed creation)
         self._agent = None
@@ -500,6 +509,9 @@ class TinyAgent:
         mode_info = "intelligent" if self.intelligent_mode else "basic"
         log_technical("info", f"TinyAgent initialized in {mode_info} mode with {len(enabled_servers)} MCP servers (streaming: {self.use_streaming})")
         log_agent("Agent ready for tasks")
+        
+        # Add to global cleanup list
+        _active_servers.append(self)
     
     def _should_use_litellm(self, model_name: str) -> bool:
         """
@@ -781,6 +793,9 @@ class TinyAgent:
             Agent execution result
         """
         try:
+            # 🚀 ITERATION 1: 基础进度提示 (R05.1.1.1)
+            print("🤖 启动TinyAgent...")
+            
             log_technical("info", f"Running agent with message: {message[:100]}...")
             
             # 🔧 SIMPLIFIED: Only use intelligent mode
@@ -790,10 +805,16 @@ class TinyAgent:
                     "Please check if intelligence components are properly installed."
                 )
             
+            print("🧠 启动智能推理模式...")
             log_technical("info", "Using intelligent mode with ReAct loop")
-            return await self._run_intelligent_mode(message, **kwargs)
+            
+            result = await self._run_intelligent_mode(message, **kwargs)
+            
+            print("✅ 任务完成")
+            return result
             
         except Exception as e:
+            print("❌ 任务执行失败")
             log_technical("error", f"Agent execution failed: {e}")
             raise
 
@@ -816,10 +837,14 @@ class TinyAgent:
                 # 🔧 DISABLED FALLBACK: Don't fall back to basic mode
                 raise RuntimeError("IntelligentAgent is required but not available")
             
+            # 🚀 ITERATION 1: MCP连接进度提示 (R05.1.1.1)
+            print("🔌 连接MCP服务器...")
+            
             # Register MCP tools with the intelligent agent if available
             await self._register_mcp_tools_with_intelligent_agent(intelligent_agent)
             
             # Execute using intelligent agent with full ReAct loop
+            print("🧠 开始智能分析...")
             log_agent("Starting intelligent task execution with ReAct loop...")
             result = await intelligent_agent.run(message, context=kwargs)
             
@@ -1001,7 +1026,7 @@ class TinyAgent:
                 
                 # Store successful connection
                 self._persistent_connections[server_config.name] = server_instance
-                self._connection_status[server_config.name] = "connected"
+                self._connection_health[server_config.name] = "connected"
                 
                 log_agent(f"Connected to {server_config.name}")
                 log_technical("info", f"Successfully connected to MCP server: {server_config.name}")
@@ -1012,12 +1037,12 @@ class TinyAgent:
             except asyncio.TimeoutError:
                 log_agent(f"Connection timeout for {server_config.name}")
                 log_technical("warning", f"MCP server {server_config.name} connection timed out")
-                self._connection_status[server_config.name] = "timeout"
+                self._connection_health[server_config.name] = "timeout"
                 continue
             except Exception as e:
                 log_agent(f"Connection failed for {server_config.name}: {str(e)}")
                 log_technical("error", f"Failed to connect to MCP server {server_config.name}: {e}")
-                self._connection_status[server_config.name] = "failed"
+                self._connection_health[server_config.name] = "failed"
                 continue
         
         self._connections_initialized = True
@@ -1063,12 +1088,12 @@ class TinyAgent:
             if server_instance:
                 await asyncio.wait_for(server_instance.connect(), timeout=60.0)
                 self._persistent_connections[server_name] = server_instance
-                self._connection_status[server_name] = "connected"
+                self._connection_health[server_name] = "connected"
                 log_technical("info", f"Successfully reconnected to MCP server: {server_name}")
                 return True
         except Exception as e:
             log_technical("error", f"Failed to reconnect to MCP server {server_name}: {e}")
-            self._connection_status[server_name] = "failed"
+            self._connection_health[server_name] = "failed"
         
         return False
 
@@ -1371,7 +1396,7 @@ class TinyAgent:
         
         # Reset connection state for lazy loading
         self._persistent_connections.clear()
-        self._connection_status.clear()
+        self._connection_health.clear()
         self._connections_initialized = False
         
         # Recreate agent with new servers
@@ -1391,7 +1416,7 @@ class TinyAgent:
         Returns:
             Dictionary mapping server names to their connection status
         """
-        return dict(self._connection_status)
+        return dict(self._connection_health)
     
     def get_active_mcp_servers(self) -> List[str]:
         """
@@ -1400,7 +1425,7 @@ class TinyAgent:
         Returns:
             List of active server names
         """
-        return [name for name, status in self._connection_status.items() if status == "connected"]
+        return [name for name, status in self._connection_health.items() if status == "connected"]
     
     async def close_mcp_connections(self):
         """Close all MCP connections and clean up resources."""
@@ -1430,7 +1455,7 @@ class TinyAgent:
                 log_technical("warning", f"Error closing MCP connection {server_name}: {e}")
         
         self._persistent_connections.clear()
-        self._connection_status.clear()
+        self._connection_health.clear()
         self._connections_initialized = False
         
         log_technical("info", "All MCP connections closed")
@@ -1438,7 +1463,7 @@ class TinyAgent:
     def reset_mcp_connections(self):
         """Reset MCP connection state (for debugging/testing)."""
         self._persistent_connections.clear()
-        self._connection_status.clear()
+        self._connection_health.clear()
         self._connections_initialized = False
         log_technical("info", "MCP connection state reset")
 
@@ -1689,6 +1714,29 @@ class TinyAgent:
             try:
                 log_technical("info", f"MCP tool executor: executing {tool_name} with params: {params}")
                 
+                # ⚡ ITERATION 2: 检查缓存 (R05.2.1.1)
+                if self._is_tool_cached(tool_name, params):
+                    cached_result = self._get_cached_result(tool_name, params)
+                    # 🎨 ITERATION 3: 缓存命中也使用智能摘要 (R05.3.1.1)
+                    summary = self._format_tool_result_summary(tool_name, cached_result)
+                    print(f"📋 使用缓存结果")
+                    print(f"⚡ 节省执行时间")
+                    print(f"📊 {tool_name}: {summary}")
+                    
+                    # 🎨 ITERATION 3: 缓存详细模式 (R05.3.1.2)
+                    if self.verbose and cached_result:
+                        preview = cached_result[:200]
+                        if len(cached_result) > 200:
+                            preview += "..."
+                        print(f"📄 详细结果 (缓存):\n{preview}")
+                    
+                    log_technical("info", f"Cache hit for {tool_name}: returning cached result")
+                    log_tool(f"MCP tool cache hit: {tool_name} -> {len(cached_result)} chars")
+                    return cached_result
+                
+                # 🚀 ITERATION 1: 工具执行进度提示 (R05.1.1.2)
+                print(f"🔍 正在使用 {tool_name} 工具...")
+                
                 # Ensure MCP connections are established
                 connected_servers = await self._ensure_mcp_connections()
                 
@@ -1763,8 +1811,15 @@ class TinyAgent:
                     # Execute the tool using the MCP protocol
                     log_technical("info", f"Executing {tool_name} on server {server_name}")
                     
+                    # 🔧 R06.3.2: 记录执行时间
+                    import time
+                    exec_start_time = time.time()
+                    
                     # 🔧 CRITICAL FIX: Use direct call_tool method with proper parameters
                     result = await target_server.call_tool(tool_name, params or {})
+                    
+                    # 🔧 R06.3.2: 记录执行结束时间
+                    self._last_tool_exec_time = time.time() - exec_start_time
                     
                     # Process result and return
                     if hasattr(result, 'content'):
@@ -1785,12 +1840,47 @@ class TinyAgent:
                     log_technical("info", f"Tool {tool_name} executed successfully: {actual_result[:200]}...")
                     log_tool(f"MCP tool executed: {server_name}.{tool_name} -> {len(actual_result)} chars")
                     
+                    # ⚡ ITERATION 2: 缓存工具执行结果 (R05.2.1.1)
+                    self._cache_tool_result(tool_name, params, actual_result)
+                    
+                    # 🎨 ITERATION 3: 智能结果摘要显示 (R05.3.1.1)
+                    summary = self._format_tool_result_summary(tool_name, actual_result)
+                    print(f"📊 {tool_name}: {summary}")
+                    
+                    # 🎨 ITERATION 3: 可配置详细程度 (R05.3.1.2)
+                    # 🔧 R06.3.2: 优化verbose模式输出
+                    if self.verbose and actual_result:
+                        # 显示详细结果的前200字符
+                        preview = actual_result[:200]
+                        if len(actual_result) > 200:
+                            preview += "..."
+                        print(f"📄 详细结果:\n{preview}")
+                        
+                        # 🔧 R06.3.2: 为get_web_content显示URL信息
+                        if tool_name == "get_web_content" and params.get("url"):
+                            print(f"🌐 访问URL: {params['url']}")
+                        
+                        # 🔧 R06.3.2: 显示执行时间和数据量信息
+                        if hasattr(self, '_last_tool_exec_time'):
+                            print(f"⏱️ 执行耗时: {self._last_tool_exec_time:.2f}秒")
+                        print(f"📏 数据量: {len(actual_result)} 字符")
+                    
                     return actual_result
                     
                 except ImportError as import_error:
                     log_technical("error", f"Failed to import CallToolRequest: {import_error}")
                     return f"Tool execution failed: MCP types not available - {import_error}"
                 except Exception as e:
+                    # 🔧 R06.3.1: 改善工具错误提示
+                    error_msg = str(e)
+                    if "url" in error_msg.lower() and "required" in error_msg.lower():
+                        print(f"❌ {tool_name}调用失败: 缺少url参数")
+                        print(f"💡 建议: get_web_content工具需要url参数，将尝试从搜索结果中自动提取")
+                    else:
+                        print(f"❌ {tool_name}调用失败: {error_msg}")
+                        if tool_name == "get_web_content":
+                            print(f"💡 建议: 请确保提供有效的URL参数")
+                    
                     log_technical("error", f"Failed to execute tool {tool_name}: {e}")
                     return f"Tool execution failed: {e}"
                 
@@ -1803,6 +1893,108 @@ class TinyAgent:
                 return f"Tool execution failed: {str(e)}"
         
         return execute_mcp_tool
+
+    def _format_tool_result_summary(self, tool_name: str, result: str) -> str:
+        """🎨 格式化工具执行结果的智能摘要 (R05.3.1.1)"""
+        if not result:
+            return "无结果"
+        
+        result_len = len(result)
+        tool_name_lower = tool_name.lower()
+        
+        # 🔍 搜索类工具的专用摘要
+        if 'search' in tool_name_lower or 'google' in tool_name_lower:
+            lines = [line.strip() for line in result.split('\n') if line.strip()]
+            # 过滤掉非URL行，只计算真正的搜索结果
+            url_lines = [line for line in lines if line.startswith('http')]
+            if url_lines:
+                return f"找到 {len(url_lines)} 个搜索结果"
+            else:
+                return f"搜索完成 ({result_len} 字符)"
+        
+        # 📄 文件操作类工具的专用摘要
+        elif any(op in tool_name_lower for op in ['read', 'file', 'edit', 'write']):
+            if 'read' in tool_name_lower:
+                return f"读取文件内容 ({result_len} 字符)"
+            elif 'write' in tool_name_lower or 'edit' in tool_name_lower:
+                return f"文件操作完成 ({result_len} 字符响应)"
+            elif 'list' in tool_name_lower or 'directory' in tool_name_lower:
+                lines = [line.strip() for line in result.split('\n') if line.strip()]
+                return f"列出 {len(lines)} 个项目"
+            else:
+                return f"文件操作完成 ({result_len} 字符)"
+        
+        # 🌐 网页内容获取类工具的专用摘要
+        elif 'web' in tool_name_lower or 'content' in tool_name_lower or 'fetch' in tool_name_lower:
+            if 'error' in result.lower() or 'failed' in result.lower():
+                return f"获取失败 ({result_len} 字符错误信息)"
+            else:
+                return f"获取网页内容 ({result_len} 字符)"
+        
+        # 📅 时间/天气类工具的专用摘要
+        elif any(keyword in tool_name_lower for keyword in ['weather', 'date', 'weekday']):
+            if 'weather' in tool_name_lower:
+                return f"天气信息 ({result_len} 字符)"
+            elif 'date' in tool_name_lower or 'weekday' in tool_name_lower:
+                return f"时间信息: {result.strip()[:50]}" if result_len < 100 else f"时间信息 ({result_len} 字符)"
+        
+        # 🔧 默认摘要（通用工具）
+        else:
+            # 如果结果很短，直接显示内容
+            if result_len <= 50:
+                return f"结果: {result.strip()}"
+            # 如果结果较长，显示开头+长度
+            elif result_len <= 200:
+                return f"结果: {result.strip()[:50]}... ({result_len} 字符)"
+            # 如果结果很长，只显示长度
+            else:
+                return f"执行完成 ({result_len} 字符结果)"
+
+    def _get_cache_key(self, tool_name: str, params: dict) -> str:
+        """⚡ 生成工具调用的缓存键 (R05.2.1.1)"""
+        # 对参数进行排序确保一致性
+        sorted_params = sorted(params.items()) if params else []
+        params_str = str(sorted_params)
+        return f"{tool_name}:{hash(params_str)}"
+    
+    def _is_tool_cached(self, tool_name: str, params: dict) -> bool:
+        """⚡ 检查工具调用是否已缓存"""
+        if not self._cache_enabled:
+            return False
+        cache_key = self._get_cache_key(tool_name, params)
+        return cache_key in self._tool_cache
+    
+    def _get_cached_result(self, tool_name: str, params: dict) -> Any:
+        """⚡ 获取缓存的工具调用结果"""
+        cache_key = self._get_cache_key(tool_name, params)
+        return self._tool_cache.get(cache_key)
+    
+    def _cache_tool_result(self, tool_name: str, params: dict, result: Any) -> None:
+        """⚡ 缓存工具调用结果"""
+        if not self._cache_enabled:
+            return
+        cache_key = self._get_cache_key(tool_name, params)
+        self._tool_cache[cache_key] = result
+    
+    def set_cache_enabled(self, enabled: bool) -> None:
+        """⚡ 启用或禁用工具缓存 (R05.2.1.2)"""
+        self._cache_enabled = enabled
+        if not enabled:
+            self._tool_cache.clear()
+        log_technical("info", f"Tool cache {'enabled' if enabled else 'disabled'}")
+    
+    def clear_cache(self) -> None:
+        """⚡ 清空工具缓存"""
+        cache_size = len(self._tool_cache)
+        self._tool_cache.clear()
+        log_technical("info", f"Cleared {cache_size} cached tool results")
+    
+    def get_cache_stats(self) -> Dict[str, int]:
+        """⚡ 获取缓存统计信息"""
+        return {
+            "cached_items": len(self._tool_cache),
+            "cache_enabled": self._cache_enabled
+        }
 
 def create_agent(
     name: Optional[str] = None,

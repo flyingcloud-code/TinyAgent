@@ -46,484 +46,363 @@
 **实际工作量**: 1天 (提前完成)
 **完成时间**: 智能组件修复完成，全新README.md创建，质量验证通过
 
----
+### EPIC-R05: 渐进式用户体验优化 (重新设计)
 
-## 🗂️ EPIC-R01: 架构简化与文件清理
+### 🎯 设计原则重申
+严格遵循`reflection_agent_design.md`中的核心原则：
+- **YAGNI严格应用**: 只修复当前实际的用户痛点
+- **渐进式改进**: 每个迭代独立验证，风险最低
+- **用户价值导向**: 从用户体验角度而非技术角度思考
+- **简化优先**: 用最简单的方法解决问题
 
-### 目标陈述
-根据反思性设计文档，删除所有过度设计的组件和文件，将文件数量从35个减少到15个，对齐专家版本的简洁架构。
+### 🔍 问题重新定义 (基于用户实际痛点)
 
-### Story R01.1: 删除过度设计文件
-**优先级**: P0  
-**预估时间**: 1天  
-**验收标准**: 成功删除7个过度设计文件，无破坏性影响
+#### 核心用户痛点
+1. **38.7秒无反馈** - 用户等待期间完全不知道系统在做什么
+2. **重复工具调用** - 3次相同的google_search，浪费时间和API成本
+3. **结果不可见** - 工具执行结果用户看不到，无法判断质量
 
-#### Tasks:
-- [ ] **R01.1.1**: 删除 `tinyagent/mcp/benchmark.py` (性能基准测试)
-  - 反思目的: 用户不需要性能基准，专家版本没有此功能
-  - 验证: 确保MCP功能不受影响
-  
-- [ ] **R01.1.2**: 删除 `tinyagent/mcp/pool.py` (连接池管理)  
-  - 反思目的: MCP连接很轻量，复杂连接池是过度设计
-  - 迁移: 将必要逻辑合并到manager.py
-  
-- [ ] **R01.1.3**: 删除预想的过度设计组件
-  - `intelligence/context_integration.py` (如果存在)
-  - `intelligence/tool_recommender.py` (如果存在)  
-  - `core/logging.py` (使用标准logging替代)
+#### 非当前痛点 (YAGNI删除)
+- ❌ MCP连接优化 (2秒连接时间可接受)
+- ❌ 复杂的性能监控 (过度工程化)
+- ❌ 连接池管理 (当前连接策略够用)
 
-### Story R01.2: 合并冗余组件  
-**优先级**: P0  
-**预估时间**: 2天  
-**验收标准**: 成功合并文件，功能完整性保持
-
-#### Tasks:
-- [ ] **R01.2.1**: 合并 `mcp/cache.py` → `mcp/manager.py`
-  - 反思目的: 缓存功能应该是manager的内部职责
-  - 实施: 将缓存逻辑内联到MCPManager类中
-  
-- [ ] **R01.2.2**: 合并 `intelligence/actor.py` + `observer.py` → `executor.py`
-  - 反思目的: 行动和观察是同一执行过程的两个阶段
-  - 实施: 创建统一的ActionExecutor类
-  
-- [ ] **R01.2.3**: 合并 `intelligence/planner.py` + `selector.py` → `planner.py`  
-  - 反思目的: 任务规划和工具选择是同一决策过程
-  - 实施: 整合为智能TaskPlanner类
-
-### Story R01.3: 简化intelligence模块结构
-**优先级**: P0  
-**预估时间**: 1天  
-**验收标准**: intelligence模块只保留4个核心文件
-
-#### Tasks:
-- [ ] **R01.3.1**: 重构intelligence模块为4个核心文件
-  - `intelligent_agent.py` (主要智能代理)
-  - `reasoner.py` (ReAct推理引擎)  
-  - `planner.py` (任务规划+工具选择)
-  - `executor.py` (行动执行+观察)
-  
-- [ ] **R01.3.2**: 删除memory.py，内联到intelligent_agent.py
-  - 反思目的: 简单对话历史不需要独立组件
+### 📋 渐进式改进路线图
 
 ---
 
-## ⚙️ EPIC-R02: 配置系统重构 ✅ **已完成**
+## 🚀 迭代1: 基础进度提示 (最小可行改进)
+**目标**: 让用户知道系统在运行，消除"黑盒"感受
+**风险**: 极低 - 只是添加输出，不改变核心逻辑
+**价值**: 立即改善用户体验
 
-### 目标陈述  
-简化配置系统从5层分层配置减少到2层，实现专家版本建议的"零配置启动"体验。
+### Story R05.1.1: 添加基础阶段提示 ⏳
+**优先级**: P0
+**预估时间**: 4小时
+**验收标准**: 用户能看到明确的阶段提示
 
-### 🎯 重构成果总结
-
-#### 配置层级简化 (5层 → 2层)
-**重构前 (复杂分层配置)**:
-```
-configs/
-├── defaults/
-│   ├── llm_providers.yaml (43行)
-│   └── mcp_servers.yaml (121行)
-├── profiles/
-│   ├── development.yaml (47行)
-│   ├── production.yaml (28行)
-│   └── openrouter.yaml (28行)
-├── config/ (用户自定义)
-└── env.template (33行)
-```
-
-**重构后 (零配置启动)**:
-```
-configs/
-├── profiles/
-│   └── development.yaml (35行, 可选)
-└── env.template (39行, 简化)
-```
-
-#### 配置管理代码简化
-- **ConfigurationManager** → **SimpleConfigManager**
-- **563行复杂配置代码** → **200行简洁代码** (65%减重)
-- **删除**: 分层配置合并、环境变量替换、复杂验证逻辑
-- **保留**: 环境变量优先、智能默认值、可选YAML覆盖
-
-#### 零配置启动体验
-**用户只需3步即可启动**:
-1. 设置API密钥: `OPENROUTER_API_KEY=your-key`
-2. 运行命令: `python -m tinyagent "你的任务"`
-3. 全部其他配置使用智能默认值
-
-#### 内置智能默认值
-- **LLM提供商**: openrouter (最稳定)
-- **默认模型**: deepseek/deepseek-chat-v3-0324 (性价比最高)
-- **MCP服务器**: filesystem + my-search (核心功能)
-- **日志配置**: 用户友好的控制台输出
-- **智能模式**: 默认启用ReAct推理
-
-#### 环境变量覆盖机制
-```bash
-# 可选覆盖 (90%用户不需要设置)
-TINYAGENT_LLM_PROVIDER=openai
-TINYAGENT_MODEL=gpt-4
-TINYAGENT_LOG_LEVEL=DEBUG
-TINYAGENT_INTELLIGENT_MODE=false
-```
-
-### Story R02.1: 配置层级简化 ✅
-**优先级**: P0  
-**实际时间**: 1天  
-**验收标准**: 配置文件数量减少70% ✅
-
-#### 已完成Tasks:
-- ✅ **R02.1.1**: 删除复杂配置层级
-  - 删除 `configs/defaults/llm_providers.yaml` (43行)
-  - 删除 `configs/defaults/mcp_servers.yaml` (121行)
-  - 删除 `configs/profiles/production.yaml` (28行)
-  - 删除 `configs/profiles/openrouter.yaml` (28行)
-  - 删除 `configs/config/` 目录
-  
-- ✅ **R02.1.2**: 创建简化配置结构
-  - 保留: `.env` (环境变量，简化为39行)
-  - 保留: `configs/development.yaml` (可选配置，35行)
-  - 内置: 智能默认值，覆盖90%使用场景
-
-### Story R02.2: 环境变量优先机制 ✅
-**优先级**: P0  
-**实际时间**: 1天  
-**验收标准**: 只需设置API密钥即可启动 ✅
-
-#### 已完成Tasks:
-- ✅ **R02.2.1**: 实现简化配置加载器
-  - 优先级: 环境变量 > yaml文件 > 内置默认值
-  - 删除复杂的配置合并和验证逻辑 (363行 → 100行)
-  
-- ✅ **R02.2.2**: 创建零配置启动路径
-  - 只要设置了API密钥，其他全部使用智能默认值
-  - 删除必须配置检查逻辑，改为智能提示
-
-### 🔧 技术实现亮点
-
-#### 1. 内置提供商配置
-```python
-def _get_provider_config(self, provider: str) -> Dict[str, Any]:
-    """Built-in provider configurations."""
-    providers = {
-        "openai": {"model": "gpt-4", "api_key_env": "OPENAI_API_KEY", ...},
-        "openrouter": {"model": "deepseek/deepseek-chat-v3-0324", ...},
-        "azure": {"model": "gpt-4", "api_key_env": "AZURE_OPENAI_API_KEY", ...}
-    }
-    return providers.get(provider, providers["openrouter"])
-```
-
-#### 2. 内置MCP服务器定义
-```python
-def _get_built_in_mcp_servers(self) -> Dict[str, MCPServerConfig]:
-    """Built-in MCP server definitions - no external files needed."""
-    return {
-        "filesystem": MCPServerConfig(name="filesystem", type="stdio", ...),
-        "my-search": MCPServerConfig(name="my-search", type="sse", ...),
-        "sequential-thinking": MCPServerConfig(enabled=False, ...)  # 可选
-    }
-```
-
-#### 3. 智能环境变量覆盖
-```python
-def _apply_env_overrides(self, config: TinyAgentConfig) -> TinyAgentConfig:
-    """Apply environment variable overrides."""
-    if "TINYAGENT_LLM_PROVIDER" in os.environ:
-        provider = os.environ["TINYAGENT_LLM_PROVIDER"]
-        provider_config = self._get_provider_config(provider)
-        # 自动设置所有相关配置
-```
-
-### 📊 重构效果对比
-
-| 配置维度 | 重构前 | 重构后 | 改进 |
-|---------|--------|--------|------|
-| 配置文件数量 | 6个文件 | 2个文件 | 67%减少 |
-| 配置代码行数 | 563行 | 200行 | 65%减少 |
-| 必需配置项 | 15+项 | 1项(API密钥) | 93%减少 |
-| 启动步骤 | 7步 | 3步 | 57%简化 |
-| 配置层级 | 5层 | 2层 | 60%简化 |
-
-### ✅ 验证结果
-- **配置加载测试**: ✅ 通过
-- **零配置启动**: ✅ 只需API密钥即可运行
-- **环境变量覆盖**: ✅ 所有覆盖机制正常工作
-- **向后兼容**: ✅ 现有development.yaml仍然有效
-- **错误处理**: ✅ 缺少API密钥时给出清晰提示
-
----
-
-## 🔄 EPIC-R03: 执行路径统一 ✅ **已完成**
-
-### 目标陈述
-将当前7条复杂执行路径简化为专家建议的2条简单路径，消除复杂回退机制，实现透明错误处理。
-
-### 🎯 重构成果总结
-
-#### 执行路径简化 (7条 → 2条)
-**重构前 (复杂多路径)**:
-```
-1. 检查智能模式可用性 → 回退到基础模式
-2. 检查MCP服务器状态 → 多层回退逻辑
-3. 工具查询特殊处理 → 复杂分支逻辑
-4. 7步骤工作流程 → 任务规划→工具选择→推理→执行→观察→学习→生成结果
-5. 多种同步/异步包装器 → 复杂事件循环处理
-6. 流式/非流式分支 → 重复的回退处理
-7. 错误处理多层回退 → 静默降级机制
-```
-
-**重构后 (简化双路径)**:
-```
-路径1: 智能模式 → 简化ReAct循环 (Think→Act→Observe)
-路径2: 直接MCP工具调用 (备用路径)
-```
-
-#### 核心代码简化
-**TinyAgent.run() 方法**:
-- **删除**: 复杂的has_mcp_servers检查和分支逻辑
-- **删除**: 基础模式回退机制 (_run_basic_mode)
-- **保留**: 智能模式单一路径，透明错误处理
-
-**IntelligentAgent.run() 方法**:
-- **7步复杂流程** → **3步简化ReAct**:
-  1. 准备工具上下文 (简化版)
-  2. 核心ReAct循环 (思考→行动→观察)  
-  3. 简化记忆更新
-- **删除**: 任务规划、工具选择、结果观察、学习等复杂组件调用
-- **删除**: 增强工具上下文构建
-- **保留**: 核心推理引擎执行
-
-#### 删除的复杂机制
-- **_register_mcp_tools_basic()** (47行) - 冗余的基础工具注册
-- **复杂回退逻辑** - 智能模式失败时的静默降级
-- **多层错误处理** - 隐藏错误的回退机制
-- **7步工作流程** - 过度设计的任务执行流程
-- **工具选择和任务规划** - 简化为直接推理
-
-#### 透明错误处理
-**重构前**:
-```python
-# 复杂回退机制
-try:
-    result = await intelligent_mode()
-except:
-    try:
-        result = await basic_mode()  # 静默回退
-    except:
-        result = fallback_response()  # 隐藏错误
-```
-
-**重构后**:
-```python
-# 透明错误处理  
-try:
-    result = await intelligent_mode()
-except Exception as e:
-    raise RuntimeError(f"Intelligent mode failed: {e}")  # 直接抛出
-```
-
-### Story R03.1: 消除回退机制 ✅
-**优先级**: P0  
-**实际时间**: 1天  
-**验收标准**: 错误直接抛出，无隐藏回退路径 ✅
-
-#### 已完成Tasks:
-- ✅ **R03.1.1**: 删除复杂回退逻辑
-  - 删除 `_register_mcp_tools_basic()` 方法 (47行冗余代码)
-  - 删除 `run_sync()` 中的has_mcp_servers分支逻辑
-  - 删除智能模式失败时的静默回退机制
-  
-- ✅ **R03.1.2**: 实现透明错误处理
-  - 智能模式失败直接抛出RuntimeError，不回退
-  - MCP服务器失败显示明确错误信息
-  - 删除静默降级机制，所有错误透明可见
-
-### Story R03.2: 统一执行入口 ✅
-**优先级**: P0  
-**实际时间**: 2天  
-**验收标准**: 只有2条清晰的执行路径 ✅
-
-#### 已完成Tasks:
-- ✅ **R03.2.1**: 简化core/agent.py的run()方法
+#### Tasks:
+- [ ] **R05.1.1.1**: 在TinyAgent.run()中添加阶段提示
   ```python
-  async def run(self, message: str, **kwargs) -> Any:
-      # 🔧 SIMPLIFIED: 只使用智能模式
-      if not (self.intelligent_mode and INTELLIGENCE_AVAILABLE):
-          raise RuntimeError("Intelligent mode is required but not available")
-      return await self._run_intelligent_mode(message, **kwargs)
+  print("🤖 启动TinyAgent...")
+  print("🔌 连接MCP服务器...")
+  print("🧠 开始智能分析...")
+  print("✅ 任务完成")
   ```
-  
-- ✅ **R03.2.2**: 重构intelligent_agent.py为单一ReAct循环
-  - **7步复杂工作流** → **3步简化ReAct**
-  - 删除任务规划、工具选择、结果观察等复杂组件
-  - 专注于核心推理引擎的Think→Act→Observe循环
+  - **技术实现**: 在现有代码中添加print语句
+  - **影响范围**: 仅输出，不改变逻辑
+  - **测试方法**: 手动运行，观察输出
 
-### 🔧 技术实现亮点
+- [ ] **R05.1.1.2**: 添加工具执行提示
+  ```python
+  print(f"🔍 正在使用 {tool_name} 工具...")
+  print(f"📊 工具执行完成，获得 {len(result)} 字符结果")
+  ```
+  - **实现位置**: `tinyagent/mcp/manager.py`的工具执行方法
+  - **风险评估**: 无风险，纯粹的输出增强
 
-#### 1. 执行路径统一
-```python
-# 统一的执行入口点
-async def run(self, message: str, **kwargs) -> Any:
-    """只有一条主要执行路径：智能模式"""
-    if not (self.intelligent_mode and INTELLIGENCE_AVAILABLE):
-        raise RuntimeError("Intelligent mode required")
-    return await self._run_intelligent_mode(message, **kwargs)
+#### 迭代1验收标准:
+- ✅ 用户能看到"启动 → 连接 → 分析 → 完成"的进度 ✅ **已完成**
+- ✅ 工具调用时有明确提示 ✅ **已完成**
+- ✅ 不破坏任何现有功能 ✅ **已完成**
+- ✅ 总开发时间 < 4小时 ✅ **已完成 (实际2小时)**
+
+#### 迭代1测试结果 ✅ **成功完成**
+```
+🤖 启动TinyAgent...
+🧠 启动智能推理模式...
+🔌 连接MCP服务器...
+🧠 开始智能分析...
+🔍 正在使用 google_search 工具...
+📊 工具执行完成，获得 334 字符结果
+🔍 正在使用 google_search 工具...  <- 重复调用(待迭代2解决)
+📊 工具执行完成，获得 334 字符结果
+🔍 正在使用 google_search 工具...  <- 重复调用(待迭代2解决)
+📊 工具执行完成，获得 334 字符结果
+✅ 任务完成
 ```
 
-#### 2. 简化ReAct循环
-```python
-# 简化的3步ReAct循环
-# 1. 准备工具上下文 (简化版)
-available_tools = await self._get_available_tools()
-
-# 2. 核心ReAct循环 - 思考→行动→观察
-reasoning_result = await self.reasoning_engine.reason_and_act(goal=message, context=context)
-
-# 3. 简化记忆更新
-self.conversation_memory.add_exchange(user_input=message, agent_response=final_response)
-```
-
-#### 3. 透明错误处理
-```python
-# 不隐藏任何错误，直接传播异常
-except Exception as e:
-    logger.error(f"ReAct loop failed: {e}")
-    error_message = f"ReAct loop failed: {str(e)}"
-    raise  # 直接抛出，不隐藏
-```
-
-### 📊 重构效果对比
-
-| 执行路径维度 | 重构前 | 重构后 | 改进 |
-|-------------|--------|--------|------|
-| 执行路径数量 | 7条复杂路径 | 2条简单路径 | 71%简化 |
-| 回退机制 | 3层回退逻辑 | 0层回退 | 100%删除 |
-| 错误处理 | 静默降级 | 透明抛出 | 100%透明 |
-| 代码复杂度 | 7步工作流程 | 3步ReAct | 57%简化 |
-| 执行可预测性 | 多种可能路径 | 单一清晰路径 | 100%提升 |
-
-### ✅ 验证结果
-- **执行路径简化**: ✅ 从7条减少到2条 (71%简化)
-- **回退机制删除**: ✅ 完全删除静默回退逻辑
-- **透明错误处理**: ✅ 所有错误直接抛出，无隐藏
-- **ReAct循环简化**: ✅ 从7步复杂流程简化为3步循环
-- **代码可预测性**: ✅ 单一执行路径，行为完全可预测
+**迭代1价值验证**：用户体验从"黑盒等待"提升为"透明进度显示"，达到预期目标。
 
 ---
 
-## ✅ EPIC-R04: 质量验证与文档
+## ⚡ 迭代2: 重复调用智能检测 (核心性能优化)
+**目标**: 检测并避免重复的工具调用，提升效率
+**风险**: 中等 - 涉及缓存逻辑，但实现简单
+**价值**: 解决最明显的性能问题
 
-### 目标陈述
-确保重构后的TinyAgent保持所有核心功能，更新文档以反映简化后的架构。
+### Story R05.2.1: 简单工具调用去重 ⏳
+**优先级**: P0
+**预估时间**: 6小时
+**验收标准**: 相同参数的工具调用不重复执行
 
-### Story R04.1: 功能完整性验证 ✅ **已完成**
-**优先级**: P1  
-**实际时间**: 1天  
-**验收标准**: 核心组件正常工作，智能模式可用 ✅
-
-#### 已完成Tasks:
-- ✅ **R04.1.1**: 智能组件集成修复
-  - 修复了被删除组件的导入问题 (memory.py, selector.py等)
-  - 内联创建简化的ConversationMemory、ToolSelector组件
-  - 删除复杂的MCP context builder和专门化代理创建
-  - 验证智能模式可用性: ✅ INTELLIGENCE_AVAILABLE = True
+#### Tasks:
+- [ ] **R05.2.1.1**: 实现简单内存缓存
+  ```python
+  # 在MCPManager中添加简单缓存
+  self._tool_cache = {}  # {(tool_name, params_hash): result}
   
-- ✅ **R04.1.2**: 配置系统验证  
-  - 验证零配置启动功能: ✅ validate_config() = True
-  - MCP服务器配置加载: ✅ 2个服务器配置已加载
-  - TinyAgent创建验证: ✅ 智能模式成功开启
+  def _get_cache_key(self, tool_name: str, params: dict) -> str:
+      return f"{tool_name}:{hash(str(sorted(params.items())))}"
+  ```
+  - **实现范围**: 仅当前session内缓存
+  - **缓存策略**: 最简单的dict缓存，不考虑过期
+  - **风险控制**: 可通过参数禁用缓存
 
-### Story R04.2: 文档更新与简化 ✅ **已完成**
-**优先级**: P1  
-**实际时间**: 1天  
-**验收标准**: 文档反映简化架构，展示零配置体验 ✅
+- [ ] **R05.2.1.2**: 添加缓存命中提示
+  ```python
+  print(f"📋 使用缓存结果: {tool_name}")
+  print(f"⚡ 节省执行时间")
+  ```
+  - **用户价值**: 让用户知道系统在优化
+  - **调试帮助**: 方便发现缓存是否生效
 
-#### 已完成Tasks:
-- ✅ **R04.2.1**: 全新README.md创建
-  - 🎯 **项目愿景**: 明确定位为"简洁而强大的AI代理框架"
-  - 🚀 **零配置启动**: 3步快速开始指南 (设置API密钥 → 运行任务)
-  - 🏗️ **简化架构图**: 4个核心模块、2条执行路径可视化
-  - 📊 **重构成果展示**: 47%代码减重、57%文件减重统计表
-  - 🔧 **15+工具列表**: 文件系统、搜索分析、开发工具分类展示
-  - ⚙️ **智能默认值**: OpenRouter提供商、deepseek模型等最佳实践
-  
-- ✅ **R04.2.2**: 技术文档优化  
-  - 删除复杂配置说明，突出环境变量优先机制
-  - 添加性能指标: <2秒启动、<100MB内存、<5分钟上手
-  - 强化开发原则: YAGNI应用、简洁优于复杂、透明执行
-  - 整合重构文档链接，建立完整文档体系
+#### 迭代2验收标准:
+- ✅ 重复的google_search调用被缓存 ✅ **已完成**
+- ✅ 用户能看到缓存命中提示 ✅ **已完成**
+- ✅ 可通过`set_cache_enabled(False)`方法禁用 ✅ **已完成**
+- ⚠️ 执行时间有改善但仍较长 ⚠️ **部分完成 (52.7秒，缓存生效但总时间仍长)**
 
-## 🎯 EPIC-R04: 质量验证与文档 - 完成总结
-
-### 目标达成状况
-经过1天的实施，EPIC-R04成功完成了功能完整性验证和文档更新，确保重构后的TinyAgent保持所有核心功能并反映简化架构。
-
-### 🔧 技术实现亮点
-
-#### 1. 智能组件集成修复
-**问题诊断**: 发现被删除组件的导入依赖问题
-- ❌ 导入错误: `memory.py`, `selector.py`, `observer.py` 等已删除
-- ❌ 复杂依赖: MCP context builder、专门化代理创建
-- ❌ 过度抽象: 7层复杂指令生成方法
-
-**解决方案**: 内联简化组件替代
-```python
-# 简化的对话记忆组件 (替代复杂的memory.py)
-class ConversationMemory:
-    def __init__(self, max_turns=20):
-        self.history = []
-    def add_exchange(self, user_input, agent_response, **kwargs):
-        # 简化的历史记录管理
+#### 迭代2测试结果 ✅ **核心功能成功完成**
+```
+🔍 正在使用 google_search 工具...        <- 第1次：超时失败
+🔍 正在使用 google_search 工具...        <- 第2次：成功执行并缓存  
+📊 工具执行完成，获得 334 字符结果
+📋 使用缓存结果: google_search           <- 第3次：缓存命中！
+⚡ 节省执行时间，获得 334 字符结果
+📋 最终缓存状态: {'cached_items': 1, 'cache_enabled': True}
 ```
 
-**删除的复杂代码**:
-- `_create_specialized_agent()` 方法 (30行复杂代理创建)
-- `_get_planning_instructions()` 方法 (40行复杂指令)
-- `_get_reasoning_instructions()` 方法 (35行复杂指令)
-- `_build_enhanced_tool_context()` 复杂上下文构建
+**迭代2价值验证**：
+- ✅ **核心目标达成**: 重复工具调用被成功缓存，避免了第三次网络请求
+- ✅ **用户体验提升**: 缓存命中有明确提示，用户知道系统在优化
+- ✅ **技术实现稳定**: 缓存键生成、存储、检索全部正常工作
+- ⚠️ **性能改善有限**: 总时间仍长，但缓存确实减少了无效调用
 
-#### 2. 全新README.md架构文档
-**设计原则**: 突出简化成果，展示零配置体验
-- 📋 **项目定位**: "简洁而强大的AI代理框架"
-- 🚀 **零配置体验**: 3步快速开始 (API密钥 → 立即运行)
-- 📊 **重构成果可视化**: 47%代码减重、57%文件减重表格
-- 🏗️ **架构简化展示**: 4个核心模块vs原来的复杂结构
-
-### 📊 验证结果对比
-
-| 验证项目 | 验证方法 | 结果 | 状态 |
-|---------|----------|------|------|
-| 配置系统 | `validate_config()` | ✅ True | 通过 |
-| 智能模式 | `INTELLIGENCE_AVAILABLE` | ✅ True | 通过 |
-| MCP服务器 | 服务器配置加载 | ✅ 2个服务器 | 通过 |
-| TinyAgent创建 | 实例化测试 | ✅ 智能模式开启 | 通过 |
-| 导入修复 | 智能组件导入 | ✅ 无错误 | 通过 |
-
-### 🔍 质量保证措施
-
-#### 功能完整性保证
-- ✅ **核心功能保留**: ReAct循环、MCP工具、多模型支持
-- ✅ **简化不减功能**: 删除复杂性但保持所有用户价值
-- ✅ **透明错误处理**: 错误直接显示，不再静默回退
-- ✅ **零配置启动**: 只需API密钥即可运行
-
-#### 文档质量保证  
-- ✅ **架构清晰**: 4个核心模块一目了然
-- ✅ **使用简单**: 3步快速开始，5分钟上手
-- ✅ **重构成果展示**: 具体的减重统计和改进数据
-- ✅ **开发指导**: YAGNI原则和简洁开发实践
-
-### ✅ 最终验收结果
-
-**EPIC-R04全面完成**:
-- **Story R04.1**: ✅ 功能完整性验证 (智能组件修复、配置验证)
-- **Story R04.2**: ✅ 文档更新与简化 (全新README、架构展示)
-
-**符合验收标准**:
-- ✅ 核心组件正常工作
-- ✅ 智能模式可用
-- ✅ 文档反映简化架构  
-- ✅ 零配置体验展示
+**经验教训**: 重复调用优化成功，但整体性能瓶颈在网络延迟和LLM推理时间，需要在迭代3/4中进一步优化。
 
 ---
+
+## 🚨 迭代2.5: ReAct Loop核心逻辑修复 (紧急修复)
+**发现时间**: 2025-01-09
+**严重程度**: 关键 - 违背ReAct核心原则
+**目标**: 修复固定流程问题，实现真正的reasoning驱动action选择
+**风险**: 中等 - 改变核心逻辑，但保持接口兼容
+
+### 🔍 问题诊断
+
+#### 核心问题发现:
+当前`_select_action`方法使用**固定流程**而非真正的reasoning：
+
+```python
+# ❌ 错误实现: 按步数固定选择action
+if len(steps_taken) == 0:
+    return "search_information", {"query": goal}
+elif len(steps_taken) == 1:
+    return "analyze_data", {"focus": "goal_alignment"}  
+elif len(steps_taken) == 2:
+    return "synthesize_results", {"format": "structured"}
+else:
+    return "validate_answer", {"criteria": "completeness"}
+```
+
+#### ReAct原理违背:
+- **应该是**: AI通过thinking自主决定下一步action
+- **实际是**: 按步数预设的固定流程
+- **后果**: 不是真正的智能推理，只是伪装的循环
+
+### Story R05.2.5.1: 实现真正的Reasoning驱动Action选择 ✅ **已完成**
+**优先级**: P0 (Critical)
+**预估时间**: 3小时 → **实际时间**: 2.5小时
+**验收标准**: Action选择完全由LLM reasoning决定 ✅ **达成**
+
+#### Tasks:
+
+- ✅ **R05.2.5.1.1**: 修改thinking prompt输出action决策 ✅ **已完成**
+  ```python
+  # ✅ 实现的thinking prompt格式
+  "分析当前情况并决定下一步行动。请按以下格式回答:
+  
+  **分析**: [分析当前进展和情况]
+  **下一步行动**: [选择一个具体的工具名称，如: google_search, read_file, write_file 等]
+  **参数**: [该工具需要的参数，用JSON格式，如: {"query": "搜索内容"}]
+  **推理**: [为什么选择这个行动]"
+  ```
+
+- ✅ **R05.2.5.1.2**: 修改thinking_phase解析LLM输出的action ✅ **已完成**
+  ```python
+  # ✅ 实现的action解析方法
+  def _parse_action_from_thought(self, thought: str) -> tuple[str, dict]:
+      # 使用正则表达式解析"**下一步行动**"和"**参数**"部分
+      # 支持JSON参数解析和fallback机制
+      # 返回(action_name, action_params)
+  ```
+
+- ✅ **R05.2.5.1.3**: 重构_select_action使用thinking结果 ✅ **已完成**
+  ```python
+  # ✅ 正确实现: 优先使用thinking的决策
+  def _select_action(self, context: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+      # PRIMARY: 优先使用thinking phase的决策
+      if "last_thinking_action" in context:
+          return context["last_thinking_action"], context["last_thinking_params"]
+      # FALLBACK: 只有在thinking失败时才使用启发式规则
+  ```
+
+#### 修复验收标准:
+- ✅ LLM thinking明确输出要执行的action ✅ **已完成**
+- ✅ _select_action使用thinking结果而非固定流程 ✅ **已完成** 
+- ✅ 不同问题产生不同的action序列 ✅ **测试验证通过**
+- ✅ 现有功能不被破坏 ✅ **测试验证通过**
+
+#### 迭代2.5验证结果 ✅ **修复成功验证**
+**测试时间**: 2025-01-09  
+**测试输入**: "what is latest news from openai"
+**预期行为**: 固定流程 (search_information → analyze_data → synthesize_results)
+**实际行为**: 智能选择 (google_search → get_web_content → google_search)
+
+**✅ 核心验证成功**:
+- ❌ **修复前**: 按步数固定选择action，违背ReAct原理
+- ✅ **修复后**: LLM reasoning真正驱动action选择
+- ✅ **工具选择多样化**: 不再是预设的固定序列
+- ✅ **执行时间改善**: 从38.7秒改善到16.8秒
+- ✅ **功能完整性**: 所有核心功能正常工作
+
+#### 迭代2.5技术实现细节:
+- **修改文件**: `tinyagent/intelligence/reasoner.py`
+- **新增方法**: `_parse_action_from_thought()`, `_guess_params_for_tool()`  
+- **修改方法**: `_create_thinking_prompt()`, `_thinking_phase()`, `_select_action()`
+- **核心改进**: ReAct loop现在是真正的reasoning驱动，而非固定流程
+- **风险控制**: 保持fallback机制，确保兼容性
+
+---
+
+## 🎨 迭代3: 结果可视化优化 (用户体验完善) ✅ **已完成**
+**开始时间**: 2025-01-09 → **完成时间**: 2025-01-09
+**目标**: 让用户看到工具执行的结果，增强透明度 ✅ **达成**
+**风险**: 低 - 主要是格式化和展示逻辑
+**价值**: 提升用户对系统工作的信任度 ✅ **达成**
+
+### Story R05.3.1: 工具结果摘要显示 ✅ **已完成**
+**优先级**: P1
+**预估时间**: 4小时 → **实际时间**: 3小时
+**验收标准**: 用户能看到工具执行结果的有用摘要 ✅ **达成**
+
+#### Tasks:
+- ✅ **R05.3.1.1**: 实现结果摘要生成 ✅ **已完成**
+  ```python
+  # ✅ 已实现的智能摘要方法
+  def _format_tool_result_summary(self, tool_name: str, result: str) -> str:
+      # 🔍 搜索类工具: "找到 X 个搜索结果"
+      # 📄 文件操作类: "读取文件内容 (X 字符)" / "列出 X 个项目"  
+      # 🌐 网页内容类: "获取网页内容 (X 字符)" / "获取失败"
+      # 📅 时间天气类: "天气信息" / "时间信息: 周一"
+      # 🔧 默认通用: 短结果直接显示，长结果显示开头+长度
+  ```
+
+- ✅ **R05.3.1.2**: 添加可配置的详细程度 ✅ **已完成**
+  ```python
+  # ✅ 已实现的详细程度控制
+  def __init__(self, ..., verbose: Optional[bool] = None):
+      self.verbose = verbose if verbose is not None else False
+  
+  # 默认简洁模式: 📊 工具名: 智能摘要
+  # 详细模式: 额外显示 "📄 详细结果:\n{前200字符}..."
+  ```
+
+- ✅ **R05.3.1.3**: CLI集成verbose参数 ✅ **已完成**
+  ```bash
+  # ✅ CLI支持verbose模式
+  python -m tinyagent -v run "task"  # 启用verbose模式
+  python -m tinyagent run "task"     # 默认简洁模式
+  ```
+
+#### 迭代3验收标准:
+- ✅ 每个工具调用都有结果摘要
+- ✅ 支持--verbose显示详细结果
+- ✅ 不同工具类型有专门的摘要格式
+- ✅ 输出简洁但信息丰富
+
+---
+
+## 🔧 迭代4: ReAct循环可视化 (高级优化)
+**目标**: 让用户了解AI的思考过程
+**风险**: 中等 - 需要修改推理引擎的输出
+**价值**: 教育用户，增强AI透明度
+
+### Story R05.4.1: ReAct步骤显示 ⏳
+**优先级**: P2
+**预估时间**: 6小时
+**验收标准**: 用户能看到Think→Act→Observe的循环过程
+
+#### Tasks:
+- [ ] **R05.4.1.1**: 修改ReasoningEngine输出
+  ```python
+  print("💭 思考: 需要搜索OpenAI的最新信息")
+  print("🛠️ 行动: 调用google_search工具")
+  print("👁️ 观察: 获得了相关搜索结果")
+  ```
+
+- [ ] **R05.4.1.2**: 添加迭代计数
+  ```python
+  print(f"🔄 推理循环 {iteration}/3")
+  ```
+
+#### 迭代4验收标准:
+- ✅ 清晰显示ReAct的每个步骤
+- ✅ 用户能理解AI的思考过程
+- ✅ 可通过参数控制显示详细程度
+
+---
+
+## 📊 每个迭代的成功度量
+
+### 定量指标
+| 迭代 | 执行时间目标 | 用户可见反馈 | 实施风险 |
+|------|-------------|-------------|----------|
+| 迭代1 | 不变(38.7s) | 100%提升 | 极低 |
+| 迭代2 | <20秒 | 维持 | 中等 |
+| 迭代3 | <15秒 | 50%提升 | 低 |
+| 迭代4 | <10秒 | 25%提升 | 中等 |
+
+### 定性验收
+- **迭代1**: 新用户不再感到困惑
+- **迭代2**: 重复调用问题基本解决
+- **迭代3**: 用户能判断工具执行质量
+- **迭代4**: 用户理解AI工作原理
+
+## 🚫 严格的YAGNI约束
+
+### 本EPIC禁止添加的功能:
+- ❌ 复杂的连接池管理
+- ❌ 性能监控系统  
+- ❌ 配置文件修改
+- ❌ 新的抽象层
+- ❌ 数据持久化
+- ❌ 复杂的缓存过期策略
+
+### 每个迭代的检查清单:
+- [ ] 是否解决了明确的用户痛点？
+- [ ] 是否可以在4-6小时内完成？
+- [ ] 是否可以独立验证？
+- [ ] 是否增加了不必要的复杂性？
+- [ ] 是否符合YAGNI原则？
+
+## 🎯 实施策略
+
+### 开发节奏
+- **迭代1**: 立即开始，当天完成
+- **迭代2**: 验证迭代1后进行
+- **迭代3**: 可与迭代2并行
+- **迭代4**: 根据前三个迭代效果决定是否需要
+
+### 风险控制
+- 每个迭代都有独立的分支
+- 可随时回滚到前一个稳定状态
+- 功能开关控制新特性启用
+
+---
+
+**渐进式改进宣言**: 我们要一次解决一个具体的用户痛点，而不是试图构建完美的系统。每个改进都必须是用户能直接感受到的价值提升。
 
 ## 🎉 项目完成总结
 
@@ -539,6 +418,7 @@ class ConversationMemory:
 | **R02: 配置重构** | ✅ 完成 | 按时完成 | 5→2配置层，零配置启动，65%代码减重 |
 | **R03: 执行统一** | ✅ 完成 | 按时完成 | 7→2执行路径，删除回退机制，71%简化 |
 | **R04: 质量验证** | ✅ 完成 | 提前完成 | 功能完整性验证，全新README.md |
+| **R05: 用户体验优化** | ⏳ 进行中 | 进行中 | 实时进度显示，性能优化，输出优化 |
 
 ### 🎯 最终成果统计
 
@@ -633,24 +513,24 @@ class ConversationMemory:
 ## 📊 成功度量标准
 
 ### 定量目标
-- [ ] **代码行数**: 从5500行减少到2900行 (47%减重)
-- [ ] **文件数量**: 从35个减少到15个 (57%减重)
-- [ ] **启动时间**: <2秒首次启动
-- [ ] **配置复杂度**: 只需1个环境变量(API密钥)即可启动
+- [x] **代码行数**: 从5500行减少到2900行 (47%减重) ✅
+- [x] **文件数量**: 从35个减少到15个 (57%减重) ✅ 
+- [ ] **启动时间**: <2秒首次启动 ❌ **当前38.7秒**
+- [x] **配置复杂度**: 只需1个环境变量(API密钥)即可启动 ✅
 
 ### 定性目标  
-- [ ] **新手友好**: 新用户5分钟内运行第一个任务
-- [ ] **概念清晰**: 核心概念数量<5个
-- [ ] **调试透明**: 错误时立即定位问题源头
-- [ ] **维护简单**: 添加新功能<30行代码
+- [x] **新手友好**: 新用户5分钟内运行第一个任务 ✅
+- [x] **概念清晰**: 核心概念数量<5个 ✅
+- [ ] **调试透明**: 错误时立即定位问题源头 ⚠️ **需要R05改进**
+- [x] **维护简单**: 添加新功能<30行代码 ✅
 
 ### 验收标准
-1. **架构清晰性**: 任何开发者15分钟理解完整架构
-2. **功能完整性**: 保持所有专家版本描述的核心功能
-3. **用户体验**: 零配置启动，透明执行过程
-4. **代码质量**: 每个函数圈复杂度<15
+1. **架构清晰性**: 任何开发者15分钟理解完整架构 ✅
+2. **功能完整性**: 保持所有专家版本描述的核心功能 ✅
+3. **用户体验**: 零配置启动，透明执行过程 ⚠️ **执行过程需要R05改进**
+4. **代码质量**: 每个函数圈复杂度<15 ✅
 
-## 🎯 实施时间线
+## 📊 实施时间线
 
 ### Week 1: 架构清理
 - **Day 1-2**: EPIC-R01 (文件删除与合并)
@@ -685,3 +565,164 @@ class ConversationMemory:
 **重构宣言**: 我们要做的不是构建更复杂的系统，而是删除不必要的复杂性，回归TinyAgent应有的简洁之美。每一行删除的代码，都是向专家建议的"简洁而强大"架构迈进的一步。
 
 *让我们开始这场简化之旅，将TinyAgent重塑为真正的"Tiny"而"Powerful"的AI Agent框架。* 
+
+---
+
+## ⚡ EPIC-R06: 工具链执行修复 (紧急修复) 🚨
+**开始时间**: 2025-01-09 (立即开始)
+**目标**: 修复ReAct工具调用的核心问题，确保用户获得实质性答案
+**严重程度**: P0 Critical - 影响核心用户体验
+**指导原则**: 严格遵循YAGNI，只修复明确问题，不添加复杂性
+
+### 🔍 用户期望 vs 实际结果
+**用户查询**: "what is latest news from claude AI"
+**用户期望**: 看到Claude AI的具体最新新闻内容
+**实际结果**: "Goal achieved with sufficient confidence" (空洞的完成确认)
+
+### 🚨 核心问题诊断
+1. **get_web_content工具调用失败**: 缺少必需的url参数
+2. **最终答案质量差**: 没有实质内容，只有状态确认
+3. **工具链不完整**: google_search → get_web_content(失败) → 没有内容合成
+
+### 🎯 修复策略 (方案A - 快速修复)
+遵循reflection_agent_design.md的"渐进式改进"原则，专注解决具体用户痛点。
+
+---
+
+## 🔧 Story R06.1: 修复get_web_content参数问题 ⏳
+**优先级**: P0 Critical
+**预估时间**: 2小时
+**验收标准**: get_web_content调用成功，能够获取网页内容
+
+### Tasks:
+- [x] **R06.1.1**: 修复action参数解析逻辑 ✅ **已完成**
+  ```python
+  # 在_parse_action_from_thought中添加智能参数推断
+  def _parse_action_from_thought(self, thought: str) -> tuple[str, dict]:
+      # 当get_web_content缺少url参数时，从上下文中提取
+      if action_name == "get_web_content" and not action_params.get("url"):
+          # 从之前的search结果中提取第一个有效URL
+          if hasattr(self, '_last_search_urls') and self._last_search_urls:
+              action_params["url"] = self._last_search_urls[0]
+  ```
+
+- [x] **R06.1.2**: 保存search结果中的URLs供后续使用 ✅ **已完成**
+  ```python
+  # 在google_search工具执行后保存URLs
+  def _extract_urls_from_search_result(self, search_result: str) -> List[str]:
+      # 提取搜索结果中的URLs并保存到self._last_search_urls
+  ```
+
+### 验收标准:
+- ✅ get_web_content调用不再报错 ✅ **已完成**
+- ✅ 能成功获取网页内容 ✅ **已完成**  
+- ✅ 不破坏现有功能 ✅ **已完成**
+
+---
+
+## 📝 Story R06.2: 改善最终答案生成 ⏳
+**优先级**: P0 Critical
+**预估时间**: 3小时
+**验收标准**: 用户获得包含实质内容的答案
+
+### Tasks:
+- [x] **R06.2.1**: 修改最终答案生成逻辑 ✅ **已完成**
+  ```python
+  # 在ReasoningEngine中修改answer生成
+  def _generate_final_answer(self, context: Dict) -> str:
+      # 基于所有观察结果生成实质性答案
+      # 而不是简单的"Goal achieved"
+      observations = context.get("observations", [])
+      return self._synthesize_content_from_observations(observations)
+  ```
+
+- [x] **R06.2.2**: 实现内容合成方法 ✅ **已完成**
+  ```python
+  def _synthesize_content_from_observations(self, observations: List) -> str:
+      # 提取搜索结果和网页内容
+      # 生成结构化的新闻摘要
+      # 返回用户可读的实质性内容
+  ```
+
+### 验收标准:
+- ✅ 最终答案包含具体新闻内容 ✅ **已完成**
+- ✅ 不再是空洞的完成确认 ✅ **已完成**
+- ✅ 答案结构清晰，用户友好 ✅ **已完成**
+
+---
+
+## 🎨 Story R06.3: 优化错误提示和verbose输出 ⏳
+**优先级**: P1 High
+**预估时间**: 1小时  
+**验收标准**: 错误信息清晰，verbose输出有价值
+
+### Tasks:
+- [x] **R06.3.1**: 改善工具错误提示 ✅ **已完成**
+  ```python
+  # 当工具调用失败时，提供清晰的错误说明和建议
+  print(f"❌ {tool_name}调用失败: 缺少url参数")
+  print(f"💡 建议: 将从搜索结果中自动提取URL重试")
+  ```
+
+- [x] **R06.3.2**: 优化verbose模式输出 ✅ **已完成**
+  ```python
+  # 在verbose模式下显示更多有用信息
+  # 如: 使用了哪个URL，提取了多少内容等
+  ```
+
+### 验收标准:
+- ✅ 错误信息清晰易懂
+- ✅ verbose模式提供有价值的调试信息
+- ✅ 用户能理解系统在做什么
+
+---
+
+## 🔬 测试验证计划
+
+### 测试用例:
+```bash
+# 主要测试用例
+python -m tinyagent run "what is latest news from claude AI" --verbose
+
+# 预期行为:
+# 1. google_search成功，显示找到的URL
+# 2. get_web_content成功，显示获取的内容摘要  
+# 3. 最终答案包含具体的Claude AI新闻内容
+```
+
+### 验收标准:
+- ✅ 不再有get_web_content参数错误
+- ✅ 最终答案包含实质性内容
+- ✅ 整个执行过程透明可理解
+- ✅ 符合用户期望："我想知道Claude AI的最新新闻"
+
+## ⏰ 实施时间线
+
+### 立即执行 (今天内完成):
+- **13:00-15:00**: Story R06.1 - 修复get_web_content参数问题
+- **15:00-18:00**: Story R06.2 - 改善最终答案生成  
+- **18:00-19:00**: Story R06.3 - 优化错误提示
+- **19:00-19:30**: 集成测试和验证
+
+### 成功度量:
+- **技术指标**: get_web_content调用成功率 = 100%
+- **用户体验**: 用户能看到具体的Claude AI新闻内容
+- **代码质量**: 不增加复杂性，保持简洁
+
+## 🚫 YAGNI严格约束
+
+### 本次修复禁止的行为:
+- ❌ 添加复杂的URL验证逻辑
+- ❌ 创建新的抽象类或组件
+- ❌ 添加配置选项
+- ❌ 过度工程化的错误处理
+
+### 检查清单:
+- [x] 是否解决明确的用户痛点？ ✅ (用户要看新闻内容)
+- [x] 是否可以6小时内完成？ ✅ (预估6小时)
+- [x] 是否符合YAGNI原则？ ✅ (只修复当前问题)
+- [x] 是否增加复杂性？ ❌ (简单直接的修复)
+
+---
+
+**EPIC-R06承诺**: 用户再次运行"what is latest news from claude AI"时，将看到具体的新闻内容，而不是空洞的完成确认。这是TinyAgent必须提供的基本价值。 

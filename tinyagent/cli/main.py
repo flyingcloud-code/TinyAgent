@@ -37,14 +37,16 @@ def cli(verbose: bool):
 @cli.command()
 @click.argument('prompt', required=True)
 @click.option('--output', '-o', type=click.Path(), help='Save output to file')
-def run(prompt: str, output: Optional[str]):
+@click.option('--verbose', '-v', is_flag=True, help='Show detailed tool results')
+def run(prompt: str, output: Optional[str], verbose: bool):
     """Run TinyAgent with a single task."""
     try:
         # 🔧 SIMPLIFIED: 使用简化的TinyAgent
         print(f"🚀 Starting TinyAgent...")
         print(f"📝 Task: {prompt}")
         
-        agent = TinyAgent()
+        # 🎨 ITERATION 3: 传递verbose参数给TinyAgent (R05.3.1.2)
+        agent = TinyAgent(verbose=verbose)
         result = agent.run_sync(prompt)
         
         # 处理结果
